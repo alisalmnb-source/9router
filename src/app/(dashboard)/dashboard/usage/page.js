@@ -4,6 +4,7 @@ import { Suspense, useState } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { UsageStats, RequestLogger, CardSkeleton, SegmentedControl } from "@/shared/components";
 import RequestDetailsTab from "./components/RequestDetailsTab";
+import LogsTab from "./components/LogsTab";
 
 const PERIODS = [
   { value: "today", label: "Today" },
@@ -28,7 +29,10 @@ function UsageContent() {
   const [period, setPeriod] = useState("today");
 
   const tabFromUrl = searchParams.get("tab");
-  const activeTab = tabFromUrl && ["overview", "logs", "details"].includes(tabFromUrl)
+  // FORK(logs): "logs" is the pre-existing RequestLogger view, reachable only via
+  // ?tab=logs and absent from the control below. Left as it was; this fork's tab
+  // uses the "inspector" key so the two cannot collide.
+  const activeTab = tabFromUrl && ["overview", "logs", "details", "inspector"].includes(tabFromUrl)
     ? tabFromUrl
     : "overview";
 
@@ -47,6 +51,7 @@ function UsageContent() {
           options={[
             { value: "overview", label: "Overview" },
             { value: "details", label: "Details" },
+            { value: "inspector", label: "Logs" },
           ]}
           value={activeTab}
           onChange={handleTabChange}
@@ -70,6 +75,7 @@ function UsageContent() {
       )}
       {activeTab === "logs" && <RequestLogger />}
       {activeTab === "details" && <RequestDetailsTab />}
+      {activeTab === "inspector" && <LogsTab />}
     </div>
   );
 }

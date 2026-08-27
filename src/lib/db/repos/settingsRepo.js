@@ -39,11 +39,19 @@ const DEFAULT_SETTINGS = {
   samlLoginLabel: "Sign in with SAML SSO",
   samlAttributeEmail: "email",
   samlAttributeName: "name",
-  enableObservability: false,
+  // FORK(logs): recording on by default — the Logs tab depends on it. ENABLE_REQUEST_LOGS
+  // in .env overrides this either way; the default keeps recording on if that
+  // variable is ever removed.
+  enableObservability: true,
   observabilityMaxRecords: 1000,
   observabilityBatchSize: 20,
   observabilityFlushIntervalMs: 5000,
   observabilityMaxJsonSize: 5,
+  // FORK(logs): retention for the raw dump directories under logs/. requestLogger.js
+  // writes one per attempt and never cleans up, so requestLogsFs.pruneSessions
+  // trims to this count, driven from /api/logs/records. No dashboard control —
+  // change it here.
+  requestLogsMaxSessions: 1000,
   outboundProxyEnabled: false,
   outboundProxyUrl: "",
   outboundNoProxy: "",

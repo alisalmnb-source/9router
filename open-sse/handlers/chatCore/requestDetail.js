@@ -71,6 +71,10 @@ export function buildRequestDetail(base, overrides = {}) {
     providerResponse: base.providerResponse || null,
     response: base.response || {},
     pxpipe: base.pxpipe || undefined,
+    // FORK(logs): absolute path of this attempt's raw dump under <cwd>/logs (null when
+    // ENABLE_REQUEST_LOGS is off). Links the persisted record to its staged
+    // payloads so the dashboard can show them without scanning the logs tree.
+    logDir: base.logDir || undefined,
     status: base.status || "success",
     ...overrides
   };

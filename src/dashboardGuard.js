@@ -84,6 +84,13 @@ const LOCAL_ONLY_PATHS = [
   "/api/headroom/start",
   "/api/headroom/stop",
   "/api/headroom/proxy",
+  // FORK(logs): /api/logs serves unredacted prompts, responses and raw upstream
+  // payloads. Deny-by-default below is not enough on its own, because
+  // isAuthenticated() passes anyone through when requireLogin is false — the
+  // exact hole upstream cited when it blanked /api/usage/request-details. Local
+  // only also keeps the Cloudflare tunnel and Tailscale hosts out. Drop this
+  // entry if you ever need to read logs from a remote browser.
+  "/api/logs",
 ];
 
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);

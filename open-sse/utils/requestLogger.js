@@ -69,25 +69,27 @@ function writeJsonFile(sessionPath, filename, data) {
   }
 }
 
-// Mask sensitive data in headers (DISABLED - keep full token for testing)
+// FORK(logs): enabled. Upstream shipped this disabled ("keep full token for testing"),
+// which wrote live OAuth access tokens and API keys to disk in plaintext.
+// Values are dropped entirely rather than trimmed — a partial token is still a
+// token, and a short key would survive a length-based rule untouched.
+// Key list matches sanitizeHeaders in src/lib/db/repos/requestDetailsRepo.js.
+// Every write site below must call this; a new stage that skips it reintroduces
+// the leak silently.
+const SENSITIVE_HEADER_PARTS = ["authorization", "x-api-key", "cookie", "token", "api-key"];
+
 function maskSensitiveHeaders(headers) {
   if (!headers) return {};
-  return { ...headers };
-  
-  // Old masking code (disabled):
-  // const masked = { ...headers };
-  // const sensitiveKeys = ["authorization", "x-api-key", "cookie", "token"];
-  // 
-  // for (const key of Object.keys(masked)) {
-  //   const lowerKey = key.toLowerCase();
-  //   if (sensitiveKeys.some(sk => lowerKey.includes(sk))) {
-  //     const value = masked[key];
-  //     if (value && value.length > 20) {
-  //       masked[key] = value.slice(0, 10) + "..." + value.slice(-5);
-  //     }
-  //   }
-  // }
-  // return masked;
+  const masked = { ...headers };
+
+  for (const key of Object.keys(masked)) {
+    const lowerKey = key.toLowerCase();
+    if (SENSITIVE_HEADER_PARTS.some((part) => lowerKey.includes(part))) {
+      masked[key] = "<redacted>";
+    }
+  }
+
+  return masked;
 }
 
 // No-op logger when logging is disabled
@@ -166,11 +168,17 @@ export async function createRequestLogger(sourceFormat, targetFormat, model) {
     // 5. Log provider response (for non-streaming or error)
     logProviderResponse(status, statusText, headers, body) {
       const filename = "5_res_provider.json";
+      // FORK(logs): response headers can carry set-cookie, so they are masked like the
+      // request stages. This is the write site that upstream never routed
+      // through the helper at all, so it is easy to miss.
+      const rawHeaders = headers
+        ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers)
+        : {};
       writeJsonFile(sessionPath, filename, {
         timestamp: new Date().toISOString(),
         status,
         statusText,
-        headers: headers ? (typeof headers.entries === "function" ? Object.fromEntries(headers.entries()) : headers) : {},
+        headers: maskSensitiveHeaders(rawHeaders),
         body
       });
     },
