@@ -28,7 +28,11 @@ into it.
   `tests/unit/github-monthly-usage-lock.test.js` — whose `@/lib/localDb` mock omits
   `getSettings` — took `markAccountUnavailable` down. Fixed by wrapping the call in
   `try`/`catch`; that test file is now recorded in
-  [What upstream can break](#files-the-fork-depends-on-but-never-edits).
+  [What upstream can break](#files-the-fork-depends-on-but-never-edits). The post-merge
+  check then corrected step 10, which told you to test `attempt.at` for *equality* with
+  `lastRefreshAt` — two separate `Date.now()` calls that differ by 1 to 2 ms on 40% of a
+  healthy install. Steps 1 to 5 and 9 to 11 all pass; 6, 7 and 8 need a deliberate
+  provider failure or a browser and were not run.
 - Fork point `699edac3`, tag `v0.5.55`. No merges before this.
 
 **Merging right now?** In order:
@@ -2030,6 +2034,13 @@ not that `proxy()` still consults `LOCAL_ONLY_PATHS` before the deny-by-default 
 a merge reorders those blocks the greps still pass. This step is the one that catches it,
 and it is the reason not to treat those two items as sufficient on their own.
 
+**Take the loopback readings first, in the same run.** The point of the spoofed pair is the
+*difference*, and without the loopback column a 403 could equally mean the route is broken.
+Note that `POST /api/locks/reset` with no body answers 500 on loopback — that is the route
+running and rejecting a missing `connectionId`, and it is a perfectly good "not 403".
+Verified working this way at `v0.5.59` under `next dev`: 200/500/200 on loopback, then
+403/403/200 with `Host: 192.168.1.50:20127`.
+
 ```
 # 6. Configured durations actually reach the lock. Set a value nothing else would produce.
 curl -s -X PATCH localhost:20127/api/settings \
@@ -2140,12 +2151,22 @@ connections present, points at checklist 19 — something stopped going through
 `DISABLE_BACKGROUND_TOKEN_REFRESH` also causes.
 
 **Judge the schedule structurally, not by eye.** Pick one entry with a recorded success and
-confirm `attempt.at` equals `lastRefreshAt`: the same refresh wrote both, so a disagreement
-means one of the two writes is not landing. Then confirm
-`nextRefreshDueAt − attempt.at` equals the token's lifetime minus
+confirm `attempt.at` and `lastRefreshAt` agree **to within a few milliseconds**, which is
+what "the same refresh wrote both" actually looks like. **Do not test them for equality.**
+They come from two different `Date.now()` calls — `buildRefreshAttempt` takes its own
+`nowMs`, and upstream stamps `lastRefreshAt` separately — so they routinely differ by 1 or
+2 ms and neither value is wrong. Measured across 364 recorded successes on one install:
+217 exactly equal, 147 off by 1 to 2 ms, nothing above 2 ms. An exact-equality check reports
+40% of a healthy install as broken. What a real fault looks like here is a gap of seconds
+or more, or one of the two fields missing entirely.
+
+Then confirm `nextRefreshDueAt − attempt.at` equals the token's lifetime minus
 `resolveRefreshLeadMs(provider)`. A wall-clock impression cannot check this — the two
 plausible answers, a provider's own lead and `BACKGROUND_REFRESH_LEAD_MS`, are close enough
-to look alike.
+to look alike. Do it per provider and the mirror proves itself: providers whose declared
+`refreshLeadMs` is below the background floor should all land on exactly
+`BACKGROUND_REFRESH_LEAD_MS`, and one whose declared lead is above it should land on its
+own. Both halves of the `Math.max` need to appear, or the check only exercised one branch.
 
 A failing entry is worth reading rather than treating as a fault: `ok: false` with
 `code: null` is the normal shape, because most providers return a bare `null`. An overdue
