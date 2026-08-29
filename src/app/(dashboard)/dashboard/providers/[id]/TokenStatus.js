@@ -46,10 +46,13 @@ export default function TokenStatus({ status }) {
 
   const { attempt, lastRefreshAt, scheduled, nextRefreshDueAt } = status;
 
-  // Three cases, in order of how much they tell you. The fork's own record wins when it
-  // exists; upstream's lastRefreshAt is the fallback for a connection that has not
-  // refreshed through checkAndRefreshToken since this feature was installed. Showing
-  // both would put two different "last refresh" times on one row.
+  // Three cases, in order of how much they tell you. The fork's own record is the richer
+  // one because it carries an outcome, but it is not always the current one: several paths
+  // refresh the token and stamp upstream's lastRefreshAt without recording an attempt, the
+  // Test button in this same row among them. /api/token-status compares the two and sends
+  // only the newer, so at most one arrives here — see isSupersededByLastRefresh in
+  // src/sse/services/tokenRefreshStatus.js. Showing both would put two different
+  // "last refresh" times on one row.
   let historyText;
   let historyIsError = false;
   if (attempt) {

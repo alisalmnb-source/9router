@@ -212,6 +212,45 @@ function readRefreshAttempt(connection) {
 }
 
 /**
+ * Has something refreshed this credential since the stored attempt was recorded?
+ *
+ * `tokenRefreshAttempt` has exactly one writer — `recordRefreshAttempt` in
+ * `tokenRefresh.js`, reachable only through `checkAndRefreshToken`. Other paths refresh
+ * the same credential by calling `refreshProviderCredentials` directly, and
+ * `mergeRefreshedCredentials` stamps `lastRefreshAt` on every one of them while nothing
+ * records an attempt: `src/app/api/providers/[id]/test/testUtils.js` — the Test button in
+ * the same row as this status line — plus `src/app/api/translator/send/route.js`,
+ * `src/app/api/usage/[connectionId]/route.js`, and codex login and bulk import.
+ *
+ * Without this check the stored record wins unconditionally and the row goes stale. The
+ * visible failure is a *failed* attempt outliving its cause: press Test, watch it succeed
+ * and set `testStatus` back to `active`, and the line under the now-green badge still asks
+ * for re-authentication. Re-authenticating does not clear it either, because the record
+ * survives the connection update. It would sit there until the sweep next refreshes this
+ * connection for real, which for a long-lived token is days away.
+ *
+ * **The comparison is strict, and its direction is the whole guard — never turn it into an
+ * equality test.** On the `checkAndRefreshToken` success path both stamps describe the same
+ * event but come from two separate `Date.now()` calls: `mergeRefreshedCredentials` takes
+ * the earlier and `buildRefreshAttempt` the later, so `attempt.at` lands 1 to 2 ms ahead
+ * and the attempt correctly keeps precedence. `lastRefreshAt` can only end up later than
+ * `attempt.at` if one of the paths above wrote it.
+ *
+ * Applied to successful attempts too, not only failed ones. `lastRefreshAt` is a
+ * success-only stamp, so when it wins the row still reads "refreshed …" and only the time
+ * changes — from a stale one to the true one. It also keeps the rule to one sentence,
+ * "the newer stamp wins", instead of two cases.
+ *
+ * @param {{at: string}|null} attempt - as returned by readRefreshAttempt, so `at` parses
+ * @param {number|null} lastRefreshMs
+ * @returns {boolean}
+ */
+function isSupersededByLastRefresh(attempt, lastRefreshMs) {
+  if (!attempt || lastRefreshMs === null) return false;
+  return lastRefreshMs > new Date(attempt.at).getTime();
+}
+
+/**
  * Everything the UI needs about one connection's token, in one object.
  *
  * `permanent` is resolved here rather than stored, using upstream's own
@@ -220,12 +259,11 @@ function readRefreshAttempt(connection) {
  * it would go stale plausibly — the flag would still read as a boolean and still look
  * right. Resolving at read time cannot drift from upstream at all.
  *
- * `lastRefreshAt` is upstream's success-only stamp and is reported only as a fallback
- * for a connection this fork has not yet observed refreshing. It is not
- * interchangeable with `attempt.at`: upstream stamps it on some paths and not others
- * (the reactive 401 refresh and the Test button both usually skip it), so it can be
- * older than reality, and it never carries an outcome. The UI shows one or the other,
- * never both, or it would show two different "last refresh" times for one row.
+ * `lastRefreshAt` is upstream's success-only stamp, and the two are not interchangeable:
+ * it carries no outcome, so it can only ever say "refreshed", never "failed". Exactly one
+ * of the pair is reported and the newer one wins — see `isSupersededByLastRefresh` for why
+ * the fork's own record is not automatically the better of the two. Reporting both would
+ * put two different "last refresh" times on one row.
  *
  * Returns `{ eligible: false }` and nothing else for a connection with no refresh to
  * report on, so the caller has one field to branch on and no half-filled object to
@@ -237,9 +275,10 @@ function readRefreshAttempt(connection) {
 export function resolveTokenRefreshStatus(connection) {
   if (!isRefreshEligible(connection)) return { eligible: false };
 
-  const attempt = readRefreshAttempt(connection);
   const nextRefreshDueAt = resolveNextRefreshDueAt(connection);
   const lastRefreshMs = getCredentialLastRefreshMs(connection);
+  const stored = readRefreshAttempt(connection);
+  const attempt = isSupersededByLastRefresh(stored, lastRefreshMs) ? null : stored;
 
   return {
     eligible: true,

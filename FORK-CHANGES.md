@@ -359,7 +359,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | --- | --- |
 | `open-sse/config/errorConfig.js` | Checklists 11, 12 and 15. **The single most consequential file for the `locks` feature, and the fork does not touch it.** `lockPolicy.js` imports `BACKOFF_CONFIG`, `COOLDOWN_MS`, `TRANSIENT_COOLDOWN_MS` and `MAX_RATE_LIMIT_COOLDOWN_MS` and uses their values as the *keys* of its remapping, so upstream retuning a number is handled automatically while upstream removing or renaming an export is a build failure. Adding a rule with a new distinct duration is the quiet case: that rule keeps upstream's value and no configured field reaches it. **`COOLDOWN_MS` is the weak link:** upstream marks it backward compat, nothing in `open-sse` actually reads it, and the fork is its only real consumer — so it is the export most likely to disappear. Checklist 12 has the consumer list and the repair. |
 | `open-sse/services/accountFallback.js` | Checklists 13, 14 and 17. Owns `getQuotaCooldown`, whose formula `resolveBackoffCooldownMs` mirrors; `checkFallbackError`, whose `newBackoffLevel` field is the only thing distinguishing a ladder duration from a fixed one; and `buildClearModelLocksUpdate` plus `MODEL_LOCK_PREFIX`, which the reset route uses so no lock-key naming is duplicated in fork code. |
-| `src/app/api/providers/[id]/test/route.js` and `test/testUtils.js` | Checklist 18 — the row button reads `valid` and `error` from this route's JSON. The fork adds no test logic of its own, so every provider quirk in `testUtils.js` shows through unchanged. Worth knowing which: `claude`, `kiro`, `kimi`, `kimi-coding` are `checkExpiry` and `cursor`, `codebuddy-cn` are `tokenExists`, so for those six a green result means "a token exists and has not expired" and nothing reaches the provider. **Also `fetchWithConnectionProxy`'s `AbortSignal.timeout(15000)`, added in `v0.5.59`:** `TEST_TIMEOUT_MS` has to stay above it, so upstream retuning that number upward past 30000 silently makes this fork's deadline the one that fires first. No checklist item covers it — the counts cannot see a number, and both values stay plausible. Read [The timeout](#the-timeout-is-the-only-new-behaviour). |
+| `src/app/api/providers/[id]/test/route.js` and `test/testUtils.js` | Checklist 18 — the row button reads `valid` and `error` from this route's JSON. The fork adds no test logic of its own, so every provider quirk in `testUtils.js` shows through unchanged. Worth knowing which: `claude`, `kiro`, `kimi`, `kimi-coding` are `checkExpiry` and `cursor`, `codebuddy-cn` are `tokenExists`, so for those six a green result means "a token exists and has not expired" and nothing reaches the provider. **Also `fetchWithConnectionProxy`'s `AbortSignal.timeout(15000)`, added in `v0.5.59`:** `TEST_TIMEOUT_MS` has to stay above it, so upstream retuning that number upward past 30000 silently makes this fork's deadline the one that fires first. No checklist item covers it — the counts cannot see a number, and both values stay plausible. Read [The timeout](#the-timeout-is-the-only-new-behaviour). **`tokenstat` depends on this file too, through `refreshOAuthToken`:** its `codex`, `grok-cli` and `xai` branches delegate to `refreshProviderCredentials` and so stamp `lastRefreshAt`, which is what lets `isSupersededByLastRefresh` retire a stale record after a Test. Every other branch hand-rolls the token POST and leaves no timestamp, so the recovery does not reach those providers. Upstream moving a branch either way silently widens or narrows that coverage, and nothing counts it. |
 | `src/app/(dashboard)/dashboard/providers/components/ConnectionsCard.js` | **A divergent copy, deliberately left alone.** It carries its own inner `ConnectionRow` and `CooldownTimer`, duplicated by upstream, and is reached only from `dashboard/media-providers/[kind]/[id]`. Neither the Test nor the Unlock button was added to it, so media-provider connections have neither. Adding them would mean maintaining the same two buttons in two components that already drift. If upstream ever merges the two copies, the buttons come along for free — check that they did. |
 | `open-sse/translator/formats.js` | Checklist 4 — a format id containing `_` splits every directory name wrongly. Thirteen ids today and none contains `_`: ten are single lowercase words, three are hyphenated (`openai-responses`, `openai-response`, `gemini-cli`). Read the **values**, not the keys — the keys do use underscores (`OPENAI_RESPONSES`) and never reach a directory name. |
 | `open-sse/utils/stream.js` | "How outcome is decided", steps 2 **and** 3 — two separate dependencies in one file. Step 3: it owns all three `[DONE]` append sites, and the fact that the translate path uses none of them is why the terminal-marker list cannot be narrowed to that one string. A new append site on the translate path would not break anything; losing `finish_reason` from the final chunk would. Step 2: it also decides **when `onStreamComplete` fires**, which is the whole basis for treating a non-placeholder body as proof the stream finished. `v0.5.59` moved that from flush-only to a `finalizeStream()` called from three places, deduplicated by a `finalized` flag — read step 2 for which direction of change breaks the signal, because a count cannot see this one. |
@@ -371,7 +371,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js` | `LogsTab` carries copies of `getInputTokens`, `getCachedTokens` and `getCacheCreationTokens` from it, on purpose: the two tabs render the same rows, so a different rule in one would show two input-token counts for one request. Change either copy and change both. **Identical logic, not identical text** — `getCachedTokens` and `getCacheCreationTokens` are character-for-character copies, while `getInputTokens` matches only in its executable lines and carries a longer comment here explaining that it is a mirror. So a text diff of the three reports a difference that is not one, and nothing in the checklist can detect a real drift — the numbers stay plausible, they just disagree. |
 | `src/sse/services/backgroundTokenRefresh.js` | Checklist 20. **The most consequential file for `tokenstat`, and the fork does not touch it.** `tokenRefreshStatus.js` mirrors it twice over: its four conditions become `isRefreshEligible` plus the `scheduled` flag, and its `Math.max(getRefreshLeadMs(provider), BACKGROUND_REFRESH_LEAD_MS)` becomes `resolveRefreshLeadMs`. Both operands are imported, so upstream retuning `BACKGROUND_REFRESH_LEAD_MS` is handled automatically and removing the export is a build failure. **Read `loadActiveConnections` as well as the selector** — the `isActive` filter lives there, not in `selectConnectionsNeedingRefresh`, and the fork's first version of the mirror missed it for exactly that reason. A fifth condition anywhere in the path is the quiet failure: the sweep skips connections the fork still shows a due time for. Also owns the interval, which is why no time is quoted for it — see the feature's known limitations. |
 | `src/sse/services/auth.js` (the credential lookup) | Checklist 20's second half. `getProviderConnections({ provider, isActive: true })` is why `isActive` belongs in eligibility rather than in `scheduled`: a disabled connection is refreshed by neither the sweep nor a request, so there is no honest phrasing for it and the row shows nothing. If upstream ever stops filtering here, a disabled connection becomes refreshable on demand again and the exclusion turns from correct into over-eager. Note this file is already in the edits table for `locks`, but for `markAccountUnavailable` — a different function with a different risk. |
-| `open-sse/services/oauthCredentialManager.js` | Checklist 20, and the failure shape behind checklist 22. Owns `getCredentialExpiryMs` (the fork's only expiry reader, and the reason a numeric epoch in seconds or milliseconds both work), `getCredentialLastRefreshMs`, and `mergeRefreshedCredentials` — whose three possible returns are exactly what `buildRefreshAttempt` is written against: `null`, an unrecoverable-error object passed straight through, or merged credentials. A fourth return shape would land in the record as a reasonless failure. |
+| `open-sse/services/oauthCredentialManager.js` | Checklist 20, and the failure shape behind checklist 22. Owns `getCredentialExpiryMs` (the fork's only expiry reader, and the reason a numeric epoch in seconds or milliseconds both work), `getCredentialLastRefreshMs`, and `mergeRefreshedCredentials` — whose three possible returns are exactly what `buildRefreshAttempt` is written against: `null`, an unrecoverable-error object passed straight through, or merged credentials. A fourth return shape would land in the record as a reasonless failure. **Also the stamping order that `isSupersededByLastRefresh` rests on:** `mergeRefreshedCredentials` takes its `nowMs` before `buildRefreshAttempt` takes its own, so on the covered path `attempt.at` is the later of the two and keeps precedence. If upstream ever made `lastRefreshAt` the later stamp — or let a provider's own value win with a clock ahead of this host's — every successful attempt would be discarded on read and the row would lose its outcome wording while still showing a plausible time. No checklist item can see this; only post-merge step 10 can. |
 | `open-sse/services/tokenRefresh.js` and `open-sse/config/appConstants.js` | Checklists 21 and 22. `getRefreshLeadMs` is the per-provider lead, `REFRESH_LEAD_MS` is derived from `PROVIDER_OAUTH` rather than written down, and `isUnrecoverableRefreshError` is the sole source of the "re-authenticate" distinction. Upstream adding a permanent code there upgrades the fork's message with no edit; upstream removing the export is a build failure. Note the derivation is also why this module can never be imported client side — see the policy-module rule above. |
 | `open-sse/handlers/chatCore.js`'s 401 block and `open-sse/executors/base.js` | Known limitations — the refresh path `tokenstat` deliberately does not observe. `chatCore.js` calls `executor.refreshCredentials` directly, so the result never passes `mergeRefreshedCredentials` and its failure branch is a `log.warn` and nothing else. If upstream ever routes that block through `checkAndRefreshToken`, the gap closes for free — check whether it did. |
 | `src/lib/db/repos/connectionsRepo.js` | Checklist 23. `updateProviderConnection` merges `{ ...existing, ...data }` with no whitelist, which is the only reason `tokenRefreshAttempt` round-trips through the `data` blob without being declared anywhere. `OPTIONAL_FIELDS` is a whitelist in `createProviderConnection` only; extending it to the update path drops the field silently, and the status line reverts to reporting upstream's `lastRefreshAt` with no outcome — a plausible-looking display, not an error. |
@@ -1180,10 +1180,20 @@ curl -s localhost:20127/api/token-status | grep -o '"ok":[a-z]*' | sort | uniq -
 
 **Upstream's `lastRefreshAt` cannot fill the gap**, for two independent reasons. It is
 stamped only on success, so it is silent about exactly the case that matters. And it is
-stamped only on the paths that pass through `mergeRefreshedCredentials` — the reactive 401
-refresh hands `executor.refreshCredentials`'s raw result to `onCredentialsRefreshed`, and
-the Test button's `refreshOAuthToken` returns raw provider tokens, so neither normally
-carries the field. It can therefore be arbitrarily older than the truth.
+stamped only on the paths that pass through `mergeRefreshedCredentials`, which the two
+uncovered paths mostly do not reach: the reactive 401 refresh hands
+`executor.refreshCredentials`'s raw result to `onCredentialsRefreshed`, and the Test
+button's `refreshOAuthToken` in `testUtils.js` is a per-provider switch whose branches
+hand-roll the token POST and return raw `{ accessToken, expiresIn, refreshToken }`. It can
+therefore be arbitrarily older than the truth.
+
+**Three of those branches are the exception, and the read side depends on them.** `codex`,
+`grok-cli` and `xai` delegate to `refreshProviderCredentials`, so for those the Test button
+does stamp `lastRefreshAt` — as do `/api/translator/send`, `/api/usage/[connectionId]`, and
+codex login and bulk import. That partial stamping is the only evidence the fork has that
+something refreshed a token behind its back, and `isSupersededByLastRefresh` reads it to
+retire a record that events have overtaken. See the first known limitation for what it
+covers and what it cannot.
 
 ### Design
 
@@ -1217,6 +1227,18 @@ result to the badge. What they do not do is get labelled as a refresh outcome. C
 either would mean editing `open-sse/`, or editing all six modality handlers rather than the
 one place they meet — see this feature's Known limitations below. (No anchor link: four
 sections now carry that heading, so the generated ids are positional and would rot.)
+
+**So the read side cannot treat the stored record as automatically current, and
+`isSupersededByLastRefresh` is what stops it from doing so.** An uncovered path that leaves
+`lastRefreshAt` behind proves a refresh succeeded after `attempt.at`; when it does, the
+record is dropped and the row falls through to that stamp. Without it a *failed* attempt
+outlives its cause and the row contradicts itself — Test succeeds, sets `testStatus` back to
+`active`, and the line under the now-green badge still asks for re-authentication.
+Re-authenticating does not clear it either, because `updateProviderConnection` merges and
+the record survives. The rule is "the newer stamp wins", and the strictness of that
+comparison is load-bearing: on the covered path both stamps describe one event from two
+`Date.now()` calls, with `buildRefreshAttempt` taking the later, so the attempt keeps
+precedence there by 1 to 2 ms. Never soften it to an equality test.
 
 **Nothing in the feature branches on a provider id.** That is the constraint to preserve
 across a merge, and it holds by construction: eligibility reads `authType`, the schedule
@@ -1373,7 +1395,9 @@ safety bound rather than a preference. So `settingsRepo.js` and
 - **Upstream's `lastRefreshAt`.** Stamping it on failure was the obvious shortcut and would
   have been a real behaviour change: `isCodexRefreshStale` reads it to decide whether to
   refresh codex proactively, so a failure-stamp would reset a staleness clock that nothing
-  had actually reset. It stays success-only and is read only as a fallback.
+  had actually reset. It stays success-only, and the fork only ever reads it — as the
+  fallback the row falls through to, and as the supersede signal in
+  `isSupersededByLastRefresh`.
 - **`updateProviderCredentials`'s whitelist.** Routing the attempt through it would have
   meant widening an upstream function for a field only the fork reads — and a failed
   refresh has no credentials to hand it anyway.
@@ -1392,9 +1416,16 @@ safety bound rather than a preference. So `settingsRepo.js` and
 - **Two of the four refresh paths are not observed** — the reactive 401 retry and the Test
   button. Both leave their own traces (`markAccountUnavailable`'s red text, the test badge)
   so neither is invisible, but a refresh that happened on one of them does not move
-  `attempt.at`. The consequence to recognise: on a busy connection the recorded attempt can
-  be older than the last real refresh. It is never *newer*, so a stale-looking line is the
-  failure direction, not a false green.
+  `attempt.at`. `isSupersededByLastRefresh` recovers the cases that leave `lastRefreshAt`
+  behind, which is the Test button on `codex`, `grok-cli` and `xai` plus
+  `/api/translator/send`, `/api/usage/[connectionId]` and codex login. **What it cannot
+  recover is every other provider's Test branch and the whole 401 path**, because those
+  return raw provider tokens and leave no timestamp anywhere for the comparison to read.
+  There a recorded failure keeps its red line until the sweep next refreshes that connection
+  for real, which for a long-lived token is days. The failure direction is a false alarm, not
+  a false green: the record is never *newer* than reality, so the line can overstate a
+  problem and never hide one. Closing the rest means a signal in `open-sse/` or in
+  `testUtils.js`, and both are outside what this feature edits.
 - **Most failures have no reason.** See the shape table above. `code` and `detail` are
   populated for the classified permanent cases and empty for everything else.
 - **The next refresh is a due time, not a schedule.** The sweep runs on its own interval,
@@ -2176,10 +2207,23 @@ confirm `attempt.at` and `lastRefreshAt` agree **to within a few milliseconds**,
 what "the same refresh wrote both" actually looks like. **Do not test them for equality.**
 They come from two different `Date.now()` calls — `buildRefreshAttempt` takes its own
 `nowMs`, and upstream stamps `lastRefreshAt` separately — so they routinely differ by 1 or
-2 ms and neither value is wrong. Measured across 364 recorded successes on one install:
-217 exactly equal, 147 off by 1 to 2 ms, nothing above 2 ms. An exact-equality check reports
-40% of a healthy install as broken. What a real fault looks like here is a gap of seconds
-or more, or one of the two fields missing entirely.
+2 ms and neither value is wrong. Measured twice on the same install, 364 recorded successes
+each time: first 217 exactly equal and 147 off by 1 to 2 ms; then 228 exactly equal, 134 off
+by 1 ms, one off by 2 ms and one off by 4 ms. So an exact-equality check reports roughly 40%
+of a healthy install as broken — and **do not read the spread as a bound either.** The
+second reading produced a 4 ms sample the first did not; the two `Date.now()` calls are
+ordered, not spaced, so any gap short enough to belong to one write is fine and no ceiling
+written here would survive the next reading. What a real fault looks like is a gap of seconds
+or more, one of the two fields missing entirely, or the sign reversed.
+
+**Check the sign of that difference too, not just its size, because
+`isSupersededByLastRefresh` depends on it.** `attempt.at` must be the later of the two on a
+recorded success — that is what keeps the record from being discarded on read. If any entry
+comes back with `lastRefreshAt` ahead of `attempt.at`, the ordering inside
+`mergeRefreshedCredentials` has moved and every success is now being retired the moment it
+is written: the row keeps showing a plausible time and quietly loses the ability to say
+"failed". A `"ok":false` count that drops to zero on an install that used to have some is
+the same symptom seen from the other side.
 
 Then confirm `nextRefreshDueAt − attempt.at` equals the token's lifetime minus
 `resolveRefreshLeadMs(provider)`. A wall-clock impression cannot check this — the two
