@@ -6,11 +6,24 @@ into it.
 - Upstream: [`decolua/9router`](https://github.com/decolua/9router) (remote `upstream`,
   default branch `master` — there is no `main`)
 - Fork point: `699edac3`, tag `v0.5.55`
-- Last merged from upstream: nothing yet, still sitting on the fork point
 - Features, oldest first: [`logs`](#feature-logs) (unredacted request inspector),
   [`locks`](#feature-locks) (configurable account cooldowns and a per connection release
   button), [`conntest`](#feature-conntest) (Test on each Connections row),
   [`tokenstat`](#feature-tokenstat) (token refresh status on each Connections row)
+
+### Merge log
+
+- `v0.5.59` → `5920eec4`, 2026-08-29. No counts moved — all 24 automated items passed
+  unchanged, and neither `open-sse/config/errorConfig.js` nor
+  `src/sse/services/backgroundTokenRefresh.js` appeared in upstream's diff at all.
+  `src/sse/services/auth.js` conflicted, in `markAccountUnavailable`'s `resetsAtMs`
+  branch; resolved by keeping upstream's antigravity case with the fork's resolver as
+  the cap on the other side. Two claims corrected instead of counts: step 2 of
+  [How outcome is decided](#how-outcome-is-decided), because upstream now calls
+  `onStreamComplete` from `transform()` as well as from `flush()`, and a new `locks`
+  known limitation, because antigravity quota blocks now bypass
+  `markAccountUnavailable` altogether.
+- Fork point `699edac3`, tag `v0.5.55`. No merges before this.
 
 **Merging right now?** In order:
 
@@ -157,7 +170,8 @@ line 49, `logs/*`, is what keeps raw dumps out of version control — see the en
 ## Fork inventory
 
 Every file the fork touches, across all features. Fifteen modified, thirteen added,
-**+336 −31** in the modified ones.
+**+343 −31** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
+over the fifteen rows of the Modified table.
 
 ```
 git grep -l --untracked "FORK(" -- open-sse src
@@ -217,7 +231,7 @@ harmless.
 | `src/lib/db/repos/settingsRepo.js` | logs | +9 −1 | `enableObservability` defaults to `true`; new `requestLogsMaxSessions`. |
 | `src/dashboardGuard.js` | logs, locks | +29 | `/api/logs` and `/api/locks` added to `LOCAL_ONLY_PATHS`. Mostly comment: the `/api/locks` entry records what the guard does *not* cover. |
 | `src/app/(dashboard)/dashboard/usage/page.js` | logs | +7 −1 | Registers the tab under the key `inspector`. |
-| `src/sse/services/auth.js` | locks | +26 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. |
+| `src/sse/services/auth.js` | locks | +33 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. Since `v0.5.59` the `resetsAtMs` branch also carries upstream's antigravity carve-out, which skips the cap rather than the resolver — the conflict landed exactly here, so the resolution is commented in place. |
 | `src/app/(dashboard)/dashboard/profile/page.js` | locks | +6 | One import, one render line for `LockDurationsCard`. |
 | `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest, tokenstat | +68 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. Then one `tokenStatus` prop and one `<TokenStatus>` line in the info column. |
 | `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +59 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
@@ -330,7 +344,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `src/app/api/providers/[id]/test/route.js` and `test/testUtils.js` | Checklist 18 — the row button reads `valid` and `error` from this route's JSON. The fork adds no test logic of its own, so every provider quirk in `testUtils.js` shows through unchanged. Worth knowing which: `claude`, `kiro`, `kimi`, `kimi-coding` are `checkExpiry` and `cursor`, `codebuddy-cn` are `tokenExists`, so for those six a green result means "a token exists and has not expired" and nothing reaches the provider. |
 | `src/app/(dashboard)/dashboard/providers/components/ConnectionsCard.js` | **A divergent copy, deliberately left alone.** It carries its own inner `ConnectionRow` and `CooldownTimer`, duplicated by upstream, and is reached only from `dashboard/media-providers/[kind]/[id]`. Neither the Test nor the Unlock button was added to it, so media-provider connections have neither. Adding them would mean maintaining the same two buttons in two components that already drift. If upstream ever merges the two copies, the buttons come along for free — check that they did. |
 | `open-sse/translator/formats.js` | Checklist 4 — a format id containing `_` splits every directory name wrongly. Thirteen ids today and none contains `_`: ten are single lowercase words, three are hyphenated (`openai-responses`, `openai-response`, `gemini-cli`). Read the **values**, not the keys — the keys do use underscores (`OPENAI_RESPONSES`) and never reach a directory name. |
-| `open-sse/utils/stream.js` | "How outcome is decided", step 3 — it owns all three `[DONE]` append sites, and the fact that the translate path uses none of them is why the terminal-marker list cannot be narrowed to that one string. A new append site on the translate path would not break anything; losing `finish_reason` from the final chunk would. |
+| `open-sse/utils/stream.js` | "How outcome is decided", steps 2 **and** 3 — two separate dependencies in one file. Step 3: it owns all three `[DONE]` append sites, and the fact that the translate path uses none of them is why the terminal-marker list cannot be narrowed to that one string. A new append site on the translate path would not break anything; losing `finish_reason` from the final chunk would. Step 2: it also decides **when `onStreamComplete` fires**, which is the whole basis for treating a non-placeholder body as proof the stream finished. `v0.5.59` moved that from flush-only to a `finalizeStream()` called from three places, deduplicated by a `finalized` flag — read step 2 for which direction of change breaks the signal, because a count cannot see this one. |
 | `open-sse/transformer/responsesTransformer.js` | Checklist 9 — `createResponsesLogger` has no callers today; wiring it up puts directories in `logs/` that retention will not touch |
 | `src/sse/handlers/chat.js` | Known limitations — its account loop is why rows are per attempt, and why some failures produce no row at all |
 | `src/app/api/settings/route.js` | Checklist 8 — `PATCH` deletes `PROTECTED_SETTING_KEYS` and lets everything else through. Turning that into an allowlist silently drops `requestLogsMaxSessions` and all six `lock*Ms` keys; the Settings card would keep reporting a successful save while every value reverted to upstream's. |
@@ -611,9 +625,32 @@ this order:
 2. **The record's completion markers**, when the record still carries them. A row
    starts life with body `"[Streaming in progress...]"`, `ttft: 0` and zero tokens,
    then gets upserted with real values by `buildOnStreamComplete`'s callback. That
-   callback runs from the transform stream's flush, which a `TransformStream` invokes
-   only on a clean close — never on abort or error. So a body that is no longer the
-   placeholder, or a non-zero ttft or completion count, means the stream finished.
+   callback only ever runs once the stream reached its end, which is what makes the
+   signal mean anything: a body that is no longer the placeholder, or a non-zero ttft
+   or completion count, means the stream finished.
+
+   **What "reached its end" means is upstream's to define, and it changed in `v0.5.59`.**
+   `createSSEStream` in `open-sse/utils/stream.js` now collects the usage-and-logging
+   tail into a `finalizeStream()` guarded by a `finalized` flag, and calls it from three
+   places: the flush, the flush's own `catch`, and — this is the new one — `transform()`,
+   as soon as an OpenAI Responses terminal event is seen. So the callback is no longer
+   flush-only. Two things follow, and only the first is obvious:
+
+   - The `finalized` flag is what keeps this signal honest. It makes `onStreamComplete`
+     fire exactly once no matter how many of the three paths are taken, so the fork's
+     upsert still runs once per request. **Lose that guard and the record is written
+     twice**, the second time from a later path with the same values — harmless for this
+     step, but the row's `logDir` and token counts get rewritten behind the reader.
+   - The new `transform()` call site *fixed* a class of false `incomplete` results
+     rather than creating one. A Responses client such as codex CLI closes on
+     `response.completed` instead of `[DONE]`, which cancels the reader so flush never
+     ran; the row kept its placeholder and this step called a completed response
+     unfinished. It now answers correctly.
+
+   The direction that would break the step is the reverse: `finalizeStream()` called
+   somewhere a terminal event has *not* been seen. Then a stream that died mid-flight
+   gets real values written over its placeholder and reads as `ok` here, with steps 3
+   and 4 never consulted.
 
    **This step is gated on `detail.response?.type === "streaming"` and answers for
    streams only.** `deriveStreamingOutcomeFromRecord` returns `null` for anything else, so
@@ -982,6 +1019,31 @@ more load-bearing than it is.
   close the gap between them.
 - **GitHub's monthly exhaustion ignores every setting**, including the provider reset
   cap. It locks the whole account until the 1st of the next UTC month.
+- **Antigravity quota exhaustion bypasses this feature entirely, as of `v0.5.59`.** It is
+  the only path that escapes *both* halves of `locks`, so it is worth knowing precisely
+  when it fires. In `src/sse/handlers/chat.js`, a 409 or 429 from antigravity calls
+  `handleAntigravityQuotaError`, and if that comes back with an exhausted model carrying a
+  future `resetAt`, `markAccountUnavailable` is **never called**. Two consequences, neither
+  of them an error anywhere:
+
+  - No configured duration is consulted, because the whole runtime footprint of
+    configurable durations lives inside that one function.
+  - No `modelLock_*` is written, so the Unlock button has nothing to clear. The block is a
+    module-level `Map` in `src/sse/services/antigravityQuota.js`, read by `auth.js`'s
+    pre-filter, and it ends only when the upstream `resetAt` passes or the process
+    restarts. **The button still renders** if `connection.lastError` or `isCooldown` says
+    so, and clicking it will report success while the account stays blocked.
+
+  The fall-through is the case that still works: when the quota call fails, or the model
+  is not actually exhausted, `handleAntigravityQuotaError` returns `null` and the normal
+  `markAccountUnavailable` path runs with configured durations intact.
+
+  **The two files disagree about what counts as antigravity, and it is upstream's
+  inconsistency, not the fork's.** `chat.js` tests the raw `provider === "antigravity"`
+  while the `resetsAtMs` branch in `auth.js` tests `resolveProviderId(provider)`. An alias
+  that resolves to antigravity therefore takes the ordinary lock path in `chat.js` while
+  `auth.js` leaves its cooldown uncapped — a lock as long as the provider asks for, with
+  the configured cap not applied. If upstream ever aligns the two, re-read this bullet.
 - **A provider-reported reset time still bypasses the ladder.** Only the cap applies, so
   if Codex says a minute, the lock is a minute however large the ladder's first step is
   set. Lowering the cap is the only control over that path.
@@ -1767,13 +1829,17 @@ npm run build          # /api/logs/records, /api/logs/session/[name], /api/locks
                        # and /api/token-status in the route list
 ```
 
-A plain checkout reports around 135 eslint errors, all inherited from upstream
-(the two largest rules being `import/no-anonymous-default-export` and
+A plain checkout is not clean, so `npx eslint .` cannot answer whether the fork is. At
+`v0.5.59` it reports 348 problems, 150 errors and 198 warnings, all inherited from
+upstream. The two largest rules are `import/no-anonymous-default-export` and
 `react-hooks/set-state-in-effect`, the latter concentrated in
-`src/shared/components/ModelSelectModal.js` and in the tool cards under
-`src/app/(dashboard)/dashboard/cli-tools/components/` — `ClaudeToolCard.js`,
-`HermesToolCard.js`, `DroidToolCard.js`, `OpenClawToolCard.js`).
-Lint the fork's own files to get a clean signal.
+`src/shared/components/ModelSelectModal.js` and across the tool cards under
+`src/app/(dashboard)/dashboard/cli-tools/components/`.
+
+**Do not expect the individual card names to hold** — which cards lead shifts with
+every upstream release, and the fork owns none of them. The total is quoted because it
+moves with upstream and its moving is uninteresting; the number that matters is the one
+below, on the fork's own files. Lint those to get a clean signal.
 
 **Lint the added files and the modified ones separately.** The added files must come back
 completely clean; the modified ones carry upstream's pre-existing errors, so the only
