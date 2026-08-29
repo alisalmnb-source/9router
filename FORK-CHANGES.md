@@ -18,11 +18,19 @@ into it.
   `src/sse/services/backgroundTokenRefresh.js` appeared in upstream's diff at all.
   `src/sse/services/auth.js` conflicted, in `markAccountUnavailable`'s `resetsAtMs`
   branch; resolved by keeping upstream's antigravity case with the fork's resolver as
-  the cap on the other side. Two claims corrected instead of counts: step 2 of
+  the cap on the other side. Three claims corrected instead of counts: step 2 of
   [How outcome is decided](#how-outcome-is-decided), because upstream now calls
-  `onStreamComplete` from `transform()` as well as from `flush()`, and a new `locks`
+  `onStreamComplete` from `transform()` as well as from `flush()`; a new `locks`
   known limitation, because antigravity quota blocks now bypass
-  `markAccountUnavailable` altogether. The test comparison then found the one real
+  `markAccountUnavailable` altogether; and
+  [The timeout](#the-timeout-is-the-only-new-behaviour) with the `conntest` limitation
+  and the `testUtils.js` row that repeat it, because `fetchWithConnectionProxy` now
+  defaults `options.signal` to `AbortSignal.timeout(15000)` — so "nothing on the server
+  side races a deadline" was false, and `TEST_TIMEOUT_MS` acquired a lower bound that no
+  checklist item can see. That one was missed in the merge commit and found afterwards,
+  by reading upstream's diff against
+  [What upstream can break](#files-the-fork-depends-on-but-never-edits) — step 1, run
+  late. The test comparison then found the one real
   regression of this merge, and it predated it: the `locks` settings read failed open
   only for an *asynchronous* throw, so the two cases in
   `tests/unit/github-monthly-usage-lock.test.js` — whose `@/lib/localDb` mock omits
@@ -351,7 +359,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | --- | --- |
 | `open-sse/config/errorConfig.js` | Checklists 11, 12 and 15. **The single most consequential file for the `locks` feature, and the fork does not touch it.** `lockPolicy.js` imports `BACKOFF_CONFIG`, `COOLDOWN_MS`, `TRANSIENT_COOLDOWN_MS` and `MAX_RATE_LIMIT_COOLDOWN_MS` and uses their values as the *keys* of its remapping, so upstream retuning a number is handled automatically while upstream removing or renaming an export is a build failure. Adding a rule with a new distinct duration is the quiet case: that rule keeps upstream's value and no configured field reaches it. **`COOLDOWN_MS` is the weak link:** upstream marks it backward compat, nothing in `open-sse` actually reads it, and the fork is its only real consumer — so it is the export most likely to disappear. Checklist 12 has the consumer list and the repair. |
 | `open-sse/services/accountFallback.js` | Checklists 13, 14 and 17. Owns `getQuotaCooldown`, whose formula `resolveBackoffCooldownMs` mirrors; `checkFallbackError`, whose `newBackoffLevel` field is the only thing distinguishing a ladder duration from a fixed one; and `buildClearModelLocksUpdate` plus `MODEL_LOCK_PREFIX`, which the reset route uses so no lock-key naming is duplicated in fork code. |
-| `src/app/api/providers/[id]/test/route.js` and `test/testUtils.js` | Checklist 18 — the row button reads `valid` and `error` from this route's JSON. The fork adds no test logic of its own, so every provider quirk in `testUtils.js` shows through unchanged. Worth knowing which: `claude`, `kiro`, `kimi`, `kimi-coding` are `checkExpiry` and `cursor`, `codebuddy-cn` are `tokenExists`, so for those six a green result means "a token exists and has not expired" and nothing reaches the provider. |
+| `src/app/api/providers/[id]/test/route.js` and `test/testUtils.js` | Checklist 18 — the row button reads `valid` and `error` from this route's JSON. The fork adds no test logic of its own, so every provider quirk in `testUtils.js` shows through unchanged. Worth knowing which: `claude`, `kiro`, `kimi`, `kimi-coding` are `checkExpiry` and `cursor`, `codebuddy-cn` are `tokenExists`, so for those six a green result means "a token exists and has not expired" and nothing reaches the provider. **Also `fetchWithConnectionProxy`'s `AbortSignal.timeout(15000)`, added in `v0.5.59`:** `TEST_TIMEOUT_MS` has to stay above it, so upstream retuning that number upward past 30000 silently makes this fork's deadline the one that fires first. No checklist item covers it — the counts cannot see a number, and both values stay plausible. Read [The timeout](#the-timeout-is-the-only-new-behaviour). |
 | `src/app/(dashboard)/dashboard/providers/components/ConnectionsCard.js` | **A divergent copy, deliberately left alone.** It carries its own inner `ConnectionRow` and `CooldownTimer`, duplicated by upstream, and is reached only from `dashboard/media-providers/[kind]/[id]`. Neither the Test nor the Unlock button was added to it, so media-provider connections have neither. Adding them would mean maintaining the same two buttons in two components that already drift. If upstream ever merges the two copies, the buttons come along for free — check that they did. |
 | `open-sse/translator/formats.js` | Checklist 4 — a format id containing `_` splits every directory name wrongly. Thirteen ids today and none contains `_`: ten are single lowercase words, three are hyphenated (`openai-responses`, `openai-response`, `gemini-cli`). Read the **values**, not the keys — the keys do use underscores (`OPENAI_RESPONSES`) and never reach a directory name. |
 | `open-sse/utils/stream.js` | "How outcome is decided", steps 2 **and** 3 — two separate dependencies in one file. Step 3: it owns all three `[DONE]` append sites, and the fact that the translate path uses none of them is why the terminal-marker list cannot be narrowed to that one string. A new append site on the translate path would not break anything; losing `finish_reason` from the final chunk would. Step 2: it also decides **when `onStreamComplete` fires**, which is the whole basis for treating a non-placeholder body as proof the stream finished. `v0.5.59` moved that from flush-only to a `finalizeStream()` called from three places, deduplicated by a `finalized` flag — read step 2 for which direction of change breaks the signal, because a count cannot see this one. |
@@ -1105,17 +1113,30 @@ would put it on the merge-conflict surface for no visible gain.
 
 ### The timeout is the only new behaviour
 
-Nothing on the server side of that route sets an `AbortSignal` or races a deadline —
-`testUtils.js` calls `fetch` directly — so a provider that accepts the connection and then
-stalls leaves the row spinning until the platform gives up. `TEST_TIMEOUT_MS` in
-`connectionTest.js` is one deadline covering every provider, on the client, without
-touching upstream. That trade is the reason the helper exists at all rather than the fetch
-being inlined into the handler.
+`TEST_TIMEOUT_MS` in `connectionTest.js` is one deadline covering every provider, on the
+client, without touching upstream. That trade is the reason the helper exists at all rather
+than the fetch being inlined into the handler.
+
+**`v0.5.59` added a server-side deadline, and it does not replace this one.**
+`fetchWithConnectionProxy` in `testUtils.js` now defaults `options.signal` to
+`AbortSignal.timeout(15000)`, and no call site overrides it, so every individual
+server-side fetch is bounded. The bound is **per fetch, not per request** — one test can
+make several in sequence, and neither `testUtils.js` nor `route.js` races a deadline for
+the response as a whole, so the row can still spin past 15s without this deadline.
+
+**`TEST_TIMEOUT_MS` has to stay above 15000**, and the ordering is the point rather than
+the values. A stalled provider trips upstream's per-fetch bound first, which returns
+`{ valid: false, error }` with the provider's own failure, and the row shows that. Set
+`TEST_TIMEOUT_MS` below 15000 and it pre-empts upstream every time, replacing each of
+those real errors with `No response within Ns` — no error anywhere, just a less useful
+message on exactly the failures the feature exists to diagnose.
 
 ### Known limitations
 
 - **The timeout is client-side only.** Aborting the fetch does not stop the server-side
-  probe, which keeps running to completion. What it bounds is the spinner, not the work.
+  probe. What it bounds is the spinner, not the work. Since `v0.5.59` the work is bounded
+  too, but by upstream and per fetch rather than per request — see
+  [The timeout](#the-timeout-is-the-only-new-behaviour).
 - **For six providers a green result does not mean the provider was contacted.**
   `claude`, `kiro`, `kimi` and `kimi-coding` are `checkExpiry` in `OAUTH_TEST_CONFIG`, and
   `cursor` and `codebuddy-cn` are `tokenExists`, so the test reads a stored expiry or the

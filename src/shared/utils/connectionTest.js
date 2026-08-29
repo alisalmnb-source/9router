@@ -1,14 +1,19 @@
 // FORK(conntest): client-side wrapper around the existing single-connection test.
 //
 // No test logic lives here. POST /api/providers/<id>/test already tests one connection
-// and already returns { valid, error, refreshed }; this only adds the timeout upstream
-// does not have and normalises the two failure shapes into one.
+// and already returns { valid, error, refreshed }; this adds a deadline for the whole
+// round trip and normalises the two failure shapes into one.
 //
-// The timeout is the reason this file exists. Nothing on that route's server path sets
-// an AbortSignal or races a deadline — testUtils.js calls fetch directly — so a provider
-// that accepts a connection and then stalls leaves the row spinning until the platform
-// gives up. One deadline here covers every provider without touching upstream, which is
-// the trade this fork prefers over per-provider server changes.
+// The deadline is the reason this file exists, and since v0.5.59 it is no longer the only
+// one in the path. fetchWithConnectionProxy in testUtils.js now defaults options.signal to
+// AbortSignal.timeout(15000), and no call site overrides it, so every individual
+// server-side fetch is bounded. That bound is per fetch, not per request: a single test
+// can make several in sequence, and neither testUtils.js nor the route races a deadline
+// for the response as a whole. So TEST_TIMEOUT_MS is still what stops the row spinning.
+//
+// Keep it above 15000. Being the longer of the two is what makes a stalled provider trip
+// upstream's per-fetch bound first, so the row reports the real error; set it lower and it
+// pre-empts that bound and replaces every such error with the generic message below.
 
 const TEST_TIMEOUT_MS = 30000;
 
