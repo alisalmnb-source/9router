@@ -5,10 +5,13 @@ import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/c
 import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
+import TokenStatus from "./TokenStatus";
 
 // FORK(conntest): onTest / testBusy.
 // FORK(locks): onResetLock.
-export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null, onTest = null, testBusy = false, onResetLock = null }) {
+// FORK(tokenstat): tokenStatus. Passed in rather than read off `connection`, because two
+// of the three values it carries cannot be derived in the browser — see TokenStatus.js.
+export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null, onTest = null, testBusy = false, onResetLock = null, tokenStatus = null }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
   // FORK(locks): local, like updatingProxy above — the parent has nothing else to do
@@ -213,6 +216,10 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
               </Badge>
             )}
           </div>
+          {/* FORK(tokenstat): renders itself away unless this connection has a token to
+              refresh, so API-key and cookie rows are unchanged. Placed above the proxy
+              detail block on purpose — this is the line that can require action. */}
+          <TokenStatus status={tokenStatus} />
           {hasAnyProxy && (
             <div className="mt-1 flex items-center gap-2 flex-wrap">
               <span className="max-w-full truncate text-[11px] text-text-muted sm:max-w-[420px]" title={proxyDisplayText}>
@@ -373,4 +380,6 @@ ConnectionRow.propTypes = {
   testBusy: PropTypes.bool,
   // FORK(locks)
   onResetLock: PropTypes.func,
+  // FORK(tokenstat): shape declared in TokenStatus.js, which is its only reader here.
+  tokenStatus: PropTypes.object,
 };

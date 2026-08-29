@@ -46,6 +46,10 @@ export default function ProviderDetailPage() {
   const [loading, setLoading] = useState(true);
   const [providerNode, setProviderNode] = useState(null);
   const [proxyPools, setProxyPools] = useState([]);
+  // FORK(tokenstat): keyed by connection id, straight from /api/token-status. Kept
+  // separate from `connections` rather than merged into each row, so a failed status
+  // fetch leaves the list rendering exactly as it did before this feature.
+  const [tokenStatuses, setTokenStatuses] = useState({});
   const [showOAuthModal, setShowOAuthModal] = useState(false);
   const [showIFlowCookieModal, setShowIFlowCookieModal] = useState(false);
   const [showAddApiKeyModal, setShowAddApiKeyModal] = useState(false);
@@ -295,11 +299,15 @@ export default function ProviderDetailPage() {
 
   const fetchConnections = useCallback(async () => {
     try {
-      const [connectionsRes, nodesRes, proxyPoolsRes, settingsRes] = await Promise.all([
+      // FORK(tokenstat): the fifth entry. /api/token-status carries what /api/providers
+      // cannot — the per-provider refresh lead has to be resolved server side, and
+      // eligibility depends on a refresh token that route blanks before answering.
+      const [connectionsRes, nodesRes, proxyPoolsRes, settingsRes, tokenStatusRes] = await Promise.all([
         fetch("/api/providers", { cache: "no-store" }),
         fetch("/api/provider-nodes", { cache: "no-store" }),
         fetch("/api/proxy-pools?isActive=true", { cache: "no-store" }),
         fetch("/api/settings", { cache: "no-store" }),
+        fetch("/api/token-status", { cache: "no-store" }),
       ]);
       const connectionsData = await connectionsRes.json();
       const nodesData = await nodesRes.json();
@@ -311,6 +319,13 @@ export default function ProviderDetailPage() {
       }
       if (proxyPoolsRes.ok) {
         setProxyPools(proxyPoolsData.proxyPools || []);
+      }
+      // FORK(tokenstat): not fatal. An empty map hides every status line and leaves the
+      // rest of the row untouched, which is the same thing that happens on a connection
+      // with no token to refresh.
+      if (tokenStatusRes.ok) {
+        const tokenStatusData = await tokenStatusRes.json();
+        setTokenStatuses(tokenStatusData.statuses || {});
       }
       // Load per-provider strategy override
       const override = (settingsData.providerStrategies || {})[providerId] || {};
@@ -1034,6 +1049,7 @@ export default function ProviderDetailPage() {
                 onTest={() => handleTestConnection(conn.id)}
                 testBusy={oneByOneRunning || oneByOneResults[conn.id]?.state === "testing"}
                 onResetLock={() => handleResetConnectionLock(conn.id)}
+                tokenStatus={tokenStatuses[conn.id] || null}
               />
             </div>
           </div>

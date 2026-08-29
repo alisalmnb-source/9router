@@ -26,6 +26,10 @@ import {
   refreshProviderCredentials as _refreshProviderCredentials,
   shouldRefreshCredentials as _shouldRefreshCredentials,
 } from "open-sse/services/oauthCredentialManager.js";
+// FORK(tokenstat): the shape of the stored attempt, and the field name, both live in
+// tokenRefreshStatus.js so the writer here and the reader behind /api/token-status
+// cannot disagree about either.
+import { REFRESH_ATTEMPT_FIELD, buildRefreshAttempt } from "./tokenRefreshStatus.js";
 
 export const TOKEN_EXPIRY_BUFFER_MS = BUFFER_MS;
 
@@ -204,6 +208,43 @@ export async function updateProviderCredentials(connectionId, newCredentials) {
   }
 }
 
+/**
+ * FORK(tokenstat): record the outcome of one refresh attempt on the connection.
+ *
+ * Separate from `updateProviderCredentials` on purpose. That function whitelists
+ * credential keys and is upstream's; a failed refresh has no credentials to hand it, so
+ * routing this through it would have meant widening an upstream whitelist for a field
+ * only the fork reads. One dedicated write instead, called from both branches of
+ * `checkAndRefreshToken`, which is what keeps the success and failure records identical
+ * in shape.
+ *
+ * **Fail-open, and deliberately quiet.** This field exists to be displayed. A dashboard
+ * detail must never be the reason a token refresh reports failure, so a write error is
+ * logged at debug and swallowed. The visible cost of that choice is a status line that
+ * silently stops updating; the alternative cost is a working refresh that looks broken.
+ *
+ * Called after the credential write, never before: the reverse order can leave a record
+ * claiming success while the credentials that justify it were never persisted.
+ *
+ * @param {string} connectionId
+ * @param {boolean} ok
+ * @param {object|null} refreshResult
+ * @returns {Promise<void>}
+ */
+async function recordRefreshAttempt(connectionId, ok, refreshResult) {
+  if (!connectionId) return;
+  try {
+    await updateProviderConnection(connectionId, {
+      [REFRESH_ATTEMPT_FIELD]: buildRefreshAttempt(ok, refreshResult),
+    });
+  } catch (error) {
+    log.debug("TOKEN_REFRESH", "Failed to record refresh attempt", {
+      connectionId,
+      error: error.message,
+    });
+  }
+}
+
 // ─── Local-specific: proactive token refresh ─────────────────────────────────
 
 /**
@@ -260,10 +301,29 @@ export async function checkAndRefreshToken(provider, credentials, options = {}) 
 
       // Non-blocking: refresh projectId with the new access token
       _refreshProjectId(provider, creds.connectionId, creds.accessToken);
+
+      // FORK(tokenstat): the whole runtime footprint of this feature is these two calls.
+      // `ok` is a literal in each branch rather than a hoisted condition, so the
+      // recorded outcome is decided by the branch that was taken and cannot disagree
+      // with it — and upstream's condition line above stays byte-identical, which is
+      // where a merge is most likely to land.
+      await recordRefreshAttempt(creds.connectionId, true, newCreds);
+    } else {
+      // FORK(tokenstat): the branch upstream leaves empty. Before this, a refresh that
+      // failed wrote nothing anywhere — `newCreds` was discarded, the stale credentials
+      // were returned, and the only trace was a log line. A connection whose refresh
+      // token had been revoked therefore kept reporting `active` until somebody pressed
+      // Test or a real request reached it.
+      await recordRefreshAttempt(creds.connectionId, false, newCreds);
     }
   }
 
   // ── 2. GitHub Copilot token expiry ────────────────────────────────────────
+  // FORK(tokenstat): deliberately not recorded. This block refreshes GitHub's
+  // second-hop Copilot token, a different credential with its own expiry, while
+  // `tokenRefreshAttempt` describes the OAuth access token that section 1 handles.
+  // Writing both into one field would make a Copilot failure read as an OAuth failure
+  // on a connection whose OAuth refresh had just succeeded.
   if (provider === "github") {
     const copilotToken = creds.providerSpecificData?.copilotToken;
     const copilotExpiresAt = creds.providerSpecificData?.copilotTokenExpiresAt

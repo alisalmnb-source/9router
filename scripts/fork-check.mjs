@@ -8,25 +8,29 @@
 // tagging it would not change the inventory count either way. It is listed in the
 // document's Added table instead, which is the only record of both untagged files.
 //
-// Why this exists: the checklist is twenty-one items and most of them are a grep with
-// an expected count. Running them by hand is twenty-one chances to skip the one that
+// Why this exists: the checklist is twenty-six items and most of them are a grep with
+// an expected count. Running them by hand is twenty-six chances to skip the one that
 // mattered, and the quoted commands are POSIX spellings that need translating on
 // Windows (`sort -u`, and PowerShell expanding the `[id]` in a path as a character
 // class). Node is already a dependency and behaves the same either way.
 //
 // This script does NOT replace FORK-CHANGES.md. It answers "did anything move?" and
-// nothing else — every repair, every reason, and the three items that can only be
+// nothing else — every repair, every reason, and the four items that can only be
 // settled by reading code live in the document. A FAIL here is an instruction to go
 // read that item, not a diagnosis.
 //
 // Deliberately NOT covered, because none of it is a grep: the "Verifying" section
-// (lint, build, the test comparison) and the eight-step post-merge check against a
+// (lint, build, the test comparison) and the eleven-step post-merge check against a
 // running instance. A clean run here is necessary and not sufficient.
 //
 // Maintaining it: the expected numbers below are the same assertions as the ones in
-// the document, so the two must move together. Checklist item 20 is the rule — when
+// the document, so the two must move together. Checklist item 25 is the rule — when
 // upstream legitimately changes a count, update both. Nothing detects a disagreement
 // between this file and the markdown.
+//
+// Adding a feature shifts the tail: feature items go before the all-features and
+// procedural ones, so the ids to fix here are the `MANUAL_ITEMS` entries, the item
+// count in the line above, and the per-feature array inside the all-features check.
 //
 // Usage:
 //   node scripts/fork-check.mjs            one line per item
@@ -330,21 +334,136 @@ const CHECKS = [
     return { ok, detail: `${lines.length} hits (expect 1)`, lines };
   }),
 
-  check(19, "all", "the fork inventory is complete", () => {
-    // The bare prefix, not one feature's tag: three files carry two tags, so
-    // per-feature greps overlap and none of them is the whole fork.
+  check(19, "tokenstat", "checkAndRefreshToken is still the one convergence point", () => {
+    // -F with the opening paren on purpose. A bare name matches nineteen lines: these 9,
+    // six static imports, the dynamic destructure in backgroundTokenRefresh.js, two fork
+    // comments and one unrelated comment in src/lib/oauth/providers/grok-cli.js. Ten of
+    // those move whenever anyone edits prose or reorders an import. With the paren the
+    // count is call sites plus the definition, which is what the item asserts.
+    const lines = gitGrep(["-nF", "--untracked", "checkAndRefreshToken(", "--", "src"]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    // The scheduler's call is the expensive one to lose: proactive refresh is where
+    // nearly every recorded attempt comes from. Assert it by name, not just by count.
+    const scheduler = lines.some(
+      (l) => l.startsWith("src/sse/services/backgroundTokenRefresh.js") && /force:\s*true/.test(l)
+    );
+    const ok = lines.length === 9 && files.size === 8 && scheduler;
+    return {
+      ok,
+      detail: `${lines.length} hits / ${files.size} files (expect 9 / 8); scheduler call ${scheduler ? "present" : "MISSING"}`,
+      lines,
+    };
+  }),
+
+  check(20, "tokenstat", "the due-time formula still agrees with the scheduler", () => {
+    const lines = gitGrep(["-n", "--untracked", "BACKGROUND_REFRESH_LEAD_MS", "--", "src"]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    const counted = lines.length === 7 && files.size === 2;
+
+    // The quiet failure no count can see: a FOURTH eligibility condition in
+    // selectConnectionsNeedingRefresh makes the sweep skip connections the fork still
+    // shows a due time for, so the row promises a refresh that never arrives. Assert the
+    // three the fork mirrors are all still there.
+    const src = readRepoFile("src/sse/services/backgroundTokenRefresh.js");
+    const body = src.match(/export function selectConnectionsNeedingRefresh[\s\S]*?\n}/);
+    if (!body) return { ok: false, detail: "could not locate selectConnectionsNeedingRefresh" };
+    const guards = {
+      authType: /authType !== "oauth"/.test(body[0]),
+      refreshToken: /!conn\.refreshToken/.test(body[0]),
+      // Two halves, so a renamed local does not read as a removed guard: the expiry has
+      // to be resolved through upstream's helper, and a null one has to skip.
+      expiry:
+        /getCredentialExpiryMs\(conn\)/.test(body[0]) &&
+        /=== null\)\s*continue/.test(body[0]),
+      // The fourth condition, and the one that is NOT in the selector. It is the filter on
+      // the list handed to it, one level up. Reading only the selector misses it, which is
+      // how the fork first shipped a due time for connections nothing would ever refresh.
+      isActiveSource: /getProviderConnections\(\{\s*isActive:\s*true\s*\}\)/.test(src),
+    };
+    const missing = Object.entries(guards).filter(([, v]) => !v).map(([k]) => k);
+    return {
+      ok: counted && missing.length === 0,
+      detail: `${lines.length} hits / ${files.size} files (expect 7 / 2); guards ${missing.length ? `MISSING: ${missing.join(", ")}` : "all four present"} — a fifth one is invisible here, read the function and its caller`,
+      lines,
+    };
+  }),
+
+  check(21, "tokenstat", "REFRESH_LEAD_MS is still registry-derived", () => {
+    // Word boundaries: without them this also matches BACKGROUND_REFRESH_LEAD_MS, a
+    // different constant in a different layer.
+    const lines = gitGrep(["-nE", "\\bREFRESH_LEAD_MS\\b", "--", "open-sse"]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    const src = readRepoFile("open-sse/config/appConstants.js");
+    // A hand-written table would still work, but a provider added without an
+    // oauth.refreshLeadMs would then silently fall back to the background floor.
+    const derived = /export const REFRESH_LEAD_MS[\s\S]{0,200}PROVIDER_OAUTH/.test(src);
+    const ok = lines.length === 4 && files.size === 2 && derived;
+    return {
+      ok,
+      detail: `${lines.length} hits / ${files.size} files (expect 4 / 2); ${derived ? "derived from PROVIDER_OAUTH" : "NO LONGER derived from PROVIDER_OAUTH"}`,
+      lines,
+    };
+  }),
+
+  check(22, "tokenstat", "isUnrecoverableRefreshError still classifies the same codes", () => {
+    // Scoped to open-sse: widening to src adds fork comment mentions that move with any
+    // edit. The fork resolves `permanent` through this function at read time, so a code
+    // dropped here turns a permanent failure into a generic one and the row stops
+    // telling you to log in again.
+    const lines = gitGrep(["-n", "isUnrecoverableRefreshError", "--", "open-sse"]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    const src = readRepoFile("open-sse/services/tokenRefresh.js");
+    const body = src.match(/export function isUnrecoverableRefreshError[\s\S]*?\n}/);
+    const codes = [
+      "unrecoverable_refresh_error",
+      "refresh_token_reused",
+      "invalid_request",
+      "invalid_grant",
+    ];
+    const absent = body ? codes.filter((c) => !body[0].includes(c)) : codes;
+    const ok = lines.length === 3 && files.size === 2 && absent.length === 0;
+    return {
+      ok,
+      detail: `${lines.length} hits / ${files.size} files (expect 3 / 2); ${absent.length ? `codes MISSING: ${absent.join(", ")}` : "all four codes listed"}`,
+      lines,
+    };
+  }),
+
+  check(23, "tokenstat", "the connection update still merges the whole object", () => {
+    // OPTIONAL_FIELDS is a whitelist in createProviderConnection only. A third use means
+    // it became one on the update path too, which drops tokenRefreshAttempt with no
+    // error — the row then falls back to upstream's lastRefreshAt with no outcome, which
+    // looks like a working display.
+    const lines = gitGrep(["-n", "OPTIONAL_FIELDS", "--", "src/lib/db/repos/connectionsRepo.js"]);
+    const src = readRepoFile("src/lib/db/repos/connectionsRepo.js");
+    const body = src.match(/export async function updateProviderConnection[\s\S]*?\n}/);
+    const freeMerge = body ? /\{ \.\.\.existing, \.\.\.data,/.test(body[0]) : false;
+    const ok = lines.length === 2 && freeMerge;
+    return {
+      ok,
+      detail: `${lines.length} OPTIONAL_FIELDS uses (expect 2: declaration + createProviderConnection); updateProviderConnection ${freeMerge ? "still merges freely" : "NO LONGER merges the whole object"} — the reduction half needs reading`,
+      lines,
+    };
+  }),
+
+  check(24, "all", "the fork inventory is complete", () => {
+    // The bare prefix, not one feature's tag: three files carry more than one tag, so
+    // per-feature greps overlap and none of them is the whole fork. The sum exceeds the
+    // file count by FIVE, not three: a two-tag file adds one and a three-tag file adds
+    // two, and there is one of the former and two of the latter.
     const files = gitGrep(["-l", "--untracked", "FORK(", "--", "open-sse", "src"]);
     const perFeature = Object.fromEntries(
-      ["logs", "locks", "conntest"].map((f) => [
+      ["logs", "locks", "conntest", "tokenstat"].map((f) => [
         f,
         gitGrep(["-l", "--untracked", `FORK(${f})`, "--", "open-sse", "src"]).length,
       ])
     );
     const sum = Object.values(perFeature).reduce((a, b) => a + b, 0);
-    const ok = files.length === 22 && sum === 25;
+    const ok = files.length === 26 && sum === 31;
+    const counts = Object.entries(perFeature).map(([f, n]) => `${f}=${n}`).join(" ");
     return {
       ok,
-      detail: `${files.length} tagged files (expect 22); logs=${perFeature.logs} locks=${perFeature.locks} conntest=${perFeature.conntest}, sum=${sum} (expect 25 — three files carry two tags)`,
+      detail: `${files.length} tagged files (expect 26); ${counts}, sum=${sum} (expect 31 — one file carries two tags, two carry three)`,
       lines: files,
     };
   }),
@@ -356,6 +475,7 @@ const MANUAL_ITEMS = [
   [4, "logs", "parseSessionName vs createLogSession: the name screen must stay a deny-list, and the stamp local-time"],
   [7, "logs", "truncateField must keep returning a new value instead of mutating its argument"],
   [17, "locks", "buildClearModelLocksUpdate must still enumerate modelLock_* by prefix, not from a fixed list"],
+  [23, "tokenstat", "buildRefreshAttempt must keep bounding code and detail through reduceDetail — GET /api/providers publishes both"],
 ];
 
 function main() {
@@ -391,10 +511,10 @@ function main() {
     console.log(`\nRead these items in FORK-CHANGES.md: ${failed.map((r) => r.id).join(", ")}.`);
     console.log("A count that moved for a legitimate upstream change is not a failure — confirm");
     console.log("the new shape, then update the number in BOTH this script and the document");
-    console.log("(checklist item 20). Re-run with --verbose to see the matched lines.");
+    console.log("(checklist item 25). Re-run with --verbose to see the matched lines.");
   } else {
-    console.log("\nStill to do by hand: the three items above, then Verifying (lint, build, the");
-    console.log("test comparison) and the eight-step post-merge check. None of those is a grep.");
+    console.log(`\nStill to do by hand: the ${MANUAL_ITEMS.length} items above, then Verifying (lint, build,`);
+    console.log("the test comparison) and the eleven-step post-merge check. None of those is a grep.");
   }
 
   process.exit(failed.length ? 1 : 0);

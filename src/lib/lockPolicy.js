@@ -91,10 +91,20 @@ const UPSTREAM_DEFAULTS = new Map(
  * Zero and negatives are rejected rather than honoured: a zero cooldown would write a
  * lock that has already expired, which reads as "no lock at all" and would quietly
  * turn off the backoff the rest of this feature exists to lengthen.
+ *
+ * The type is screened before Number() rather than after, and that ordering is the
+ * guard rather than tidiness. Number() maps several non-numbers onto plausible small
+ * positives — Number(true) is 1 and Number([5]) is 5 — so a value-only check would
+ * honour either as a millisecond cooldown and land in exactly the case above. The
+ * Settings card cannot produce one, since its input is type="number" and hands over a
+ * string, but PATCH /api/settings deletes PROTECTED_SETTING_KEYS and forwards
+ * everything else, so whatever a caller sends reaches the blob unexamined.
+ *
+ * Numeric strings stay accepted: "120" is what the card itself writes.
  */
 function readConfiguredMs(settings, key) {
   const raw = settings?.[key];
-  if (raw === null || raw === undefined || raw === "") return null;
+  if (typeof raw !== "number" && typeof raw !== "string") return null;
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : null;
 }

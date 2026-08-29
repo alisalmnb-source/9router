@@ -36,9 +36,15 @@ const UNSAFE_NAME_RE = /[/\\]|\0/;
 const DOT_SEGMENT_RE = /^\.{1,2}$/;
 
 function isUnsafeSessionName(name) {
-  const value = String(name || "");
-  if (!value) return true;
-  return UNSAFE_NAME_RE.test(value) || DOT_SEGMENT_RE.test(value);
+  // Reject a non-string outright rather than stringifying it. safeSessionPath hands
+  // whatever survives this screen straight to path.resolve, which throws on a
+  // non-string — so coercing here would let a truthy non-string past the screen and
+  // turn a "no such session" answer into an exception. Every caller today passes a
+  // string (the route param, or a value already type-checked by
+  // sessionNameFromLogDir), so this is about the two halves of the guard agreeing,
+  // not about a reachable input.
+  if (typeof name !== "string" || !name) return true;
+  return UNSAFE_NAME_RE.test(name) || DOT_SEGMENT_RE.test(name);
 }
 
 // Guards against a single multi-MB SSE transcript blowing up an API response.
@@ -511,4 +517,3 @@ export function maybePruneSessions(maxCount) {
     return null;
   }
 }
-

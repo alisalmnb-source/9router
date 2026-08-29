@@ -9,7 +9,8 @@ into it.
 - Last merged from upstream: nothing yet, still sitting on the fork point
 - Features, oldest first: [`logs`](#feature-logs) (unredacted request inspector),
   [`locks`](#feature-locks) (configurable account cooldowns and a per connection release
-  button), [`conntest`](#feature-conntest) (Test on each Connections row)
+  button), [`conntest`](#feature-conntest) (Test on each Connections row),
+  [`tokenstat`](#feature-tokenstat) (token refresh status on each Connections row)
 
 **Merging right now?** In order:
 
@@ -20,7 +21,7 @@ into it.
 2. Merge, resolve conflicts.
 3. Run `node scripts/fork-check.mjs`. It executes every grep in the
    [checklist](#upstream-merge-checklist) and prints one line per item, so a clean run
-   answers items 1 to 19 in one command and a failing one names the item to read.
+   answers items 1 to 24 in one command and a failing one names the item to read.
 4. For each `FAIL`, read the matching checklist item — it holds the repair, which the
    script does not. Then [Verifying](#verifying) and the
    [post-merge check](#post-merge-check), neither of which the script covers.
@@ -34,6 +35,51 @@ developed on Windows, where `sort -u` does not exist and PowerShell expands the 
 the path goes through `-LiteralPath`. The script already handles both. The quoted commands
 are kept because they are the readable statement of what is being asserted, and because
 `git grep` itself behaves the same on either platform.
+
+## Contents
+
+- [Maintaining this file](#maintaining-this-file) — the rules that keep the rest of it
+  useful. Read before editing this document, not before merging.
+- [Fork inventory](#fork-inventory) — every file the fork touches, as
+  [Added](#added) and [Modified](#modified) tables.
+- [Rules that outlive a feature](#rules-that-outlive-a-feature) — constraints that bind
+  the next feature too. Read before designing one.
+- [What upstream can break](#what-upstream-can-break) — the table a merge starts from:
+  [files the fork edits](#files-the-fork-edits), and
+  [files it depends on but never edits](#files-the-fork-depends-on-but-never-edits),
+  whose only record this is.
+- [Feature: logs](#feature-logs) — the unredacted request inspector.
+  [The `logDir` bridge](#the-logdir-bridge--most-likely-to-conflict) is the part a merge
+  lands on. Also [Header masking](#header-masking), [Access](#access),
+  [Tab registration](#tab-registration), [Environment](#environment) and
+  [How outcome is decided](#how-outcome-is-decided).
+- [Feature: locks](#feature-locks) — configurable cooldowns and a per connection release
+  button. [The remapping](#the-remapping--most-likely-to-conflict) is the part a merge
+  lands on. Also [The reset route](#the-reset-route).
+- [Feature: conntest](#feature-conntest) — Test on each Connections row.
+  [The timeout](#the-timeout-is-the-only-new-behaviour) is the only new behaviour.
+- [Feature: tokenstat](#feature-tokenstat) — token refresh status on each Connections row.
+  [The two branches](#the-two-branches--most-likely-to-conflict) are the part a merge
+  lands on. Also [The record field](#the-record-field),
+  [Eligibility](#eligibility-and-the-three-things-a-row-can-say) and
+  [The read route](#the-read-route).
+- [Upstream merge checklist](#upstream-merge-checklist) — one numbered item per
+  assertion, each with its grep, its expected count and its repair.
+- [Verifying](#verifying) — lint, build and the test comparison, none of which the
+  checklist covers.
+- [Post-merge check](#post-merge-check) — the steps that need a running instance,
+  because nothing above proves a feature still works end to end.
+
+**Five headings repeat across the feature sections and are deliberately absent here** —
+`Why it exists`, `Design`, `Settings`, `Deliberately untouched` and `Known limitations`. A
+repeated heading gets a positional anchor id (`#known-limitations-2`) that shifts silently
+when a feature is added or reordered, so linking them would put rotting anchors in the one
+place a reader trusts. Jump to the feature and read down: within a section they always
+appear in the order listed above, with the conflict-prone section linked here among them.
+Not every feature carries all five — `conntest` has no `Settings` and no
+`Deliberately untouched`.
+
+This list carries no counts on purpose; item 25 already owns every number that goes stale.
 
 ## Maintaining this file
 
@@ -71,11 +117,14 @@ likely you, a year from now, with conflict markers open.
   sit where the explanation belongs. Always grep the bare `FORK(<feature>)`, never the
   comment prefix. Add the tag when you add a file, and update the inventory below.
 
-  **A file can carry more than one tag, and three do.** Tag every feature whose code is
-  in the file rather than picking the dominant one, or dropping a feature leaves its lines
-  behind in a file that no longer mentions it. The consequence for greps: per-feature
-  counts overlap, so the whole-fork inventory uses the bare `FORK(` prefix and only
-  per-feature checks use a full tag.
+  **A file can carry more than one tag, and three do** — `src/dashboardGuard.js` carries
+  two, and `providers/[id]/ConnectionRow.js` and `providers/[id]/page.js` carry three
+  each. Tag every feature whose code is in the file rather than picking the dominant one,
+  or dropping a feature leaves its lines behind in a file that no longer mentions it. The
+  consequence for greps: per-feature counts overlap, so the whole-fork inventory uses the
+  bare `FORK(` prefix and only per-feature checks use a full tag. **The overlap is not one
+  per shared file** — a three-tag file inflates the per-feature sum by two — so derive the
+  expected sum from the tag counts rather than from the number of shared files.
 
   **A file that belongs to no feature carries no tag, and the Added table is its only
   record.** Two do: this document and `scripts/fork-check.mjs`. The tag's job is to return
@@ -107,22 +156,27 @@ line 49, `logs/*`, is what keeps raw dumps out of version control — see the en
 
 ## Fork inventory
 
-Every file the fork touches, across all features. Fourteen modified, ten added,
-**+250 −30** in the modified ones.
+Every file the fork touches, across all features. Fifteen modified, thirteen added,
+**+336 −31** in the modified ones.
 
 ```
 git grep -l --untracked "FORK(" -- open-sse src
 ```
 
-That returns twenty-two code files — every modified one, plus every added one except the
+That returns twenty-six code files — every modified one, plus every added one except the
 **two that belong to no feature and therefore carry no tag**: this document and
 `scripts/fork-check.mjs`. Both are listed in the Added table below, which is their only
 record; the scope above also does not reach `scripts/`, so tagging the script would not
 change the count either way.
 
 The bare `FORK(` prefix is what makes it whole-fork; a single feature is `FORK(logs)`,
-`FORK(locks)` or `FORK(conntest)`, and those three sum to twenty-five rather than
-twenty-two because three files carry two tags.
+`FORK(locks)`, `FORK(conntest)` or `FORK(tokenstat)`, and those four sum to thirty-one
+rather than twenty-six because three files carry more than one tag — one carries two and
+two carry three.
+
+Keep `--untracked` on every grep in this document. A file added by the feature you are
+working on is untracked until it is committed, and without the flag it is simply absent
+from the results — which reads as a missing tag rather than as a missing flag.
 
 The tag is exhaustive for **edits**: an untagged file is one the fork does not modify.
 
@@ -136,7 +190,7 @@ harmless.
 | File | Feature | Purpose |
 | --- | --- | --- |
 | `FORK-CHANGES.md` | — | This file. |
-| `scripts/fork-check.mjs` | — | Runs checklist items 1 to 19 and prints pass/fail per item. Holds the same expected numbers as the checklist, so **the two must be updated together** — nothing detects a disagreement between them. Node rather than a shell script so one copy works on Windows and POSIX; asserts nothing about lint, build, tests or the post-merge check. |
+| `scripts/fork-check.mjs` | — | Runs checklist items 1 to 24 and prints pass/fail per item. Holds the same expected numbers as the checklist, so **the two must be updated together** — nothing detects a disagreement between them. Node rather than a shell script so one copy works on Windows and POSIX; asserts nothing about lint, build, tests or the post-merge check. |
 | `src/lib/requestLogsFs.js` | logs | Read-only accessor for the `logs/` tree: name parsing, stage reading, outcome resolution, retention. Rewrites nothing it reads. **The only fork-added code that deletes files** — `pruneSessions` is its single `fs.rmSync`. Upstream deletes in several places of its own (`src/mitm/*`, `src/lib/db/backup.js`, `src/lib/tunnel/*`, `open-sse/executors/devin-cli.js`), so this is a claim about the fork's diff, not about the repo. |
 | `src/app/api/logs/records/route.js` | logs | List endpoint, and the only one the list view calls — so retention is triggered from here. Metadata only. |
 | `src/app/api/logs/session/[name]/route.js` | logs | Reads one session's stages, lazily, per opened row. |
@@ -145,6 +199,9 @@ harmless.
 | `src/app/api/locks/reset/route.js` | locks | Clears every `modelLock_*` on one connection plus the error state. The only fork route that mutates a connection. |
 | `src/app/(dashboard)/dashboard/profile/components/LockDurationsCard.js` | locks | The six duration fields on the Settings page. Reads and writes `/api/settings` itself. |
 | `src/shared/utils/connectionTest.js` | conntest | Client wrapper around `POST /api/providers/<id>/test`. Adds the timeout that route has no server-side equivalent for. |
+| `src/sse/services/tokenRefreshStatus.js` | tokenstat | Both halves of the feature's policy: the shape written to the record, and the read-side resolution of eligibility, permanence and the next due time. Holds `REFRESH_ATTEMPT_FIELD` and `REFRESH_ERROR_DETAIL_MAX`. **No database import** — the write call lives in `tokenRefresh.js`, matching `lockPolicy.js` and `requestLogsFs.js`. |
+| `src/app/api/token-status/route.js` | tokenstat | `GET`, one entry per connection, keyed by id. Names every field it emits instead of spreading the record, which is what keeps tokens out. The only fork route with no `LOCAL_ONLY_PATHS` entry — see its header for why. |
+| `src/app/(dashboard)/dashboard/providers/[id]/TokenStatus.js` | tokenstat | The line inside a connection row. Display only, no state, no interval. |
 
 ### Modified
 
@@ -162,8 +219,9 @@ harmless.
 | `src/app/(dashboard)/dashboard/usage/page.js` | logs | +7 −1 | Registers the tab under the key `inspector`. |
 | `src/sse/services/auth.js` | locks | +26 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. |
 | `src/app/(dashboard)/dashboard/profile/page.js` | locks | +6 | One import, one render line for `LockDurationsCard`. |
-| `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest | +59 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. |
-| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest | +42 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. `handleRunOneByOneTest` is untouched. |
+| `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest, tokenstat | +68 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. Then one `tokenStatus` prop and one `<TokenStatus>` line in the info column. |
+| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +59 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
+| `src/sse/services/tokenRefresh.js` | tokenstat | +60 | `recordRefreshAttempt`, called from both branches of `checkAndRefreshToken`. The whole runtime footprint of the feature. Upstream's `if` condition line is untouched. |
 
 ## Rules that outlive a feature
 
@@ -190,14 +248,48 @@ discovered them. Read these before designing a feature, not while merging one.
   never opens the new UI behaves exactly like upstream, and "clear the field" becomes the
   reset-to-default gesture with no extra code.
 
-- **Treat any new field on a `requestDetails` record as public.** Adding one is not a
-  private act: `src/app/api/usage/request-details/route.js` spreads the whole record and
-  blanks only `request`, `providerRequest`, `providerResponse` and `response`, so
-  everything else is served to anyone who can reach the dashboard — that route is not in
-  `LOCAL_ONLY_PATHS`, and `isAuthenticated()` passes everyone when `requireLogin` is
-  off. `logDir` stores a bare directory name instead of an absolute path for exactly
-  this reason. Weigh any new field against that route first, and if it must hold
-  something local, reduce it at the single write point in `requestDetailsRepo.js`.
+- **Treat any new field on a stored record as public.** Two record types are affected and
+  both leak the same way, through a route that spreads the whole record and blanks a fixed
+  list of secrets:
+
+  | Record | Published by | Blanks only |
+  | --- | --- | --- |
+  | `requestDetails` | `src/app/api/usage/request-details/route.js` | `request`, `providerRequest`, `providerResponse`, `response` |
+  | `providerConnections` | `src/app/api/providers/route.js` | `apiKey`, `accessToken`, `refreshToken`, `idToken` |
+
+  Neither route is in `LOCAL_ONLY_PATHS`, and `isAuthenticated()` passes everyone when
+  `requireLogin` is off, so everything not on those two blank lists is served to anyone who
+  can reach the dashboard. Adding a field is therefore not a private act. `logDir` stores a
+  bare directory name instead of an absolute path for exactly this reason, and
+  `tokenRefreshAttempt` stores a bounded, classified error instead of the provider's
+  response body for the same one.
+
+  Weigh any new field against the matching route first, and if it must hold something
+  local, reduce it at the single write point — `requestDetailsRepo.js` for the first,
+  `tokenRefreshStatus.js` for the second. **The reduction is the whole control, not a
+  belt-and-braces measure**: guarding a fork route that only re-serves these fields buys
+  nothing, because the record publishes them regardless of what the fork route does.
+
+- **A policy module goes where its imports let it go, and that decides who computes.**
+  Two shapes exist in this fork and picking the wrong one is a build-time surprise or a
+  bloated client bundle:
+
+  - *Pure and shared*, like `src/lib/lockPolicy.js` — imported by the server and by a
+    client component, so its only import is `errorConfig.js`, which itself has none.
+  - *Server side, dumb client*, like `src/lib/requestLogsFs.js` with `LogsTab.js`, or
+    `src/sse/services/tokenRefreshStatus.js` with `TokenStatus.js` — the module resolves
+    everything and the component renders the answer.
+
+  The test is mechanical: **can the module reach the value it needs without importing the
+  provider registry, the database or `fetch`?** If not, the second shape is the only
+  option, because the alternative is writing upstream's numbers down in client-safe code,
+  which the rule above forbids. `tokenRefreshStatus.js` needs `getRefreshLeadMs`, whose
+  table is derived from `PROVIDER_OAUTH`, so it could never have been the first shape.
+
+  This also settles where the file lives. A module that needs something from
+  `src/sse/services/` belongs in `src/sse/services/`: `src/lib` importing `src/sse` appears
+  nowhere in this codebase, and introducing it to save a directory move is how a layering
+  rule stops being one.
 
 ## What upstream can break
 
@@ -223,8 +315,9 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `src/app/(dashboard)/dashboard/usage/page.js` | Tab registration — the `inspector` key must not collide with upstream's `logs` |
 | `src/sse/services/auth.js` | Checklists 11 to 15 — every one of them is about whether the resolver still receives what it expects. This is the one runtime file the `locks` feature edits, so a refactor of `markAccountUnavailable` lands here and nowhere else. |
 | `src/app/(dashboard)/dashboard/profile/page.js` | Nothing but the render line for `LockDurationsCard`. If upstream restructures the Settings page into tabs, the card needs a home in the new structure — it is self-contained, so that is a move, not a rewrite. |
-| `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | Both buttons live here. Upstream reworking the action cluster costs the two buttons; upstream renaming `isCooldown` or `connection.lastError` costs the Unlock button's visibility condition, which then either never appears or never hides. |
-| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | Checklist 18. `oneByOneResults` is shared between upstream's one-by-one run and the fork's per-row test, so its `{ state, error }` shape is a contract between them now. |
+| `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | Both buttons live here. Upstream reworking the action cluster costs the two buttons; upstream renaming `isCooldown` or `connection.lastError` costs the Unlock button's visibility condition, which then either never appears or never hides. The `tokenstat` line is one self-contained element in the info column and moves with whatever that column becomes. |
+| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | Checklist 18. `oneByOneResults` is shared between upstream's one-by-one run and the fork's per-row test, so its `{ state, error }` shape is a contract between them now. Also the `Promise.all` in `fetchConnections`: upstream adding or removing a request there conflicts with the fifth entry, and a botched resolution loses `tokenStatuses` with no error — the status line just stops appearing. |
+| `src/sse/services/tokenRefresh.js` | Checklists 19 and 23. The one file `tokenstat` edits at runtime, so a refactor of `checkAndRefreshToken` lands here and nowhere else. Two specific risks: upstream retuning the success condition (`accessToken \|\| apiKey \|\| copilotToken`) silently reclassifies attempts, since the recorded `ok` is decided by which branch ran; and upstream adding an early `return` inside the refresh block skips both `recordRefreshAttempt` calls, which reads as a connection that stopped being refreshed rather than one that stopped being recorded. |
 
 ### Files the fork depends on but never edits
 
@@ -243,6 +336,14 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `src/app/api/settings/route.js` | Checklist 8 — `PATCH` deletes `PROTECTED_SETTING_KEYS` and lets everything else through. Turning that into an allowlist silently drops `requestLogsMaxSessions` and all six `lock*Ms` keys; the Settings card would keep reporting a successful save while every value reverted to upstream's. |
 | `src/app/api/usage/request-details/route.js` | Deliberately untouched — upstream's redaction has to stay as written. Also the reason record fields are treated as public: it forwards everything except the four payloads, and it is not local-only. |
 | `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js` | `LogsTab` carries copies of `getInputTokens`, `getCachedTokens` and `getCacheCreationTokens` from it, on purpose: the two tabs render the same rows, so a different rule in one would show two input-token counts for one request. Change either copy and change both. **Identical logic, not identical text** — `getCachedTokens` and `getCacheCreationTokens` are character-for-character copies, while `getInputTokens` matches only in its executable lines and carries a longer comment here explaining that it is a mirror. So a text diff of the three reports a difference that is not one, and nothing in the checklist can detect a real drift — the numbers stay plausible, they just disagree. |
+| `src/sse/services/backgroundTokenRefresh.js` | Checklist 20. **The most consequential file for `tokenstat`, and the fork does not touch it.** `tokenRefreshStatus.js` mirrors it twice over: its four conditions become `isRefreshEligible` plus the `scheduled` flag, and its `Math.max(getRefreshLeadMs(provider), BACKGROUND_REFRESH_LEAD_MS)` becomes `resolveRefreshLeadMs`. Both operands are imported, so upstream retuning `BACKGROUND_REFRESH_LEAD_MS` is handled automatically and removing the export is a build failure. **Read `loadActiveConnections` as well as the selector** — the `isActive` filter lives there, not in `selectConnectionsNeedingRefresh`, and the fork's first version of the mirror missed it for exactly that reason. A fifth condition anywhere in the path is the quiet failure: the sweep skips connections the fork still shows a due time for. Also owns the interval, which is why no time is quoted for it — see the feature's known limitations. |
+| `src/sse/services/auth.js` (the credential lookup) | Checklist 20's second half. `getProviderConnections({ provider, isActive: true })` is why `isActive` belongs in eligibility rather than in `scheduled`: a disabled connection is refreshed by neither the sweep nor a request, so there is no honest phrasing for it and the row shows nothing. If upstream ever stops filtering here, a disabled connection becomes refreshable on demand again and the exclusion turns from correct into over-eager. Note this file is already in the edits table for `locks`, but for `markAccountUnavailable` — a different function with a different risk. |
+| `open-sse/services/oauthCredentialManager.js` | Checklist 20, and the failure shape behind checklist 22. Owns `getCredentialExpiryMs` (the fork's only expiry reader, and the reason a numeric epoch in seconds or milliseconds both work), `getCredentialLastRefreshMs`, and `mergeRefreshedCredentials` — whose three possible returns are exactly what `buildRefreshAttempt` is written against: `null`, an unrecoverable-error object passed straight through, or merged credentials. A fourth return shape would land in the record as a reasonless failure. |
+| `open-sse/services/tokenRefresh.js` and `open-sse/config/appConstants.js` | Checklists 21 and 22. `getRefreshLeadMs` is the per-provider lead, `REFRESH_LEAD_MS` is derived from `PROVIDER_OAUTH` rather than written down, and `isUnrecoverableRefreshError` is the sole source of the "re-authenticate" distinction. Upstream adding a permanent code there upgrades the fork's message with no edit; upstream removing the export is a build failure. Note the derivation is also why this module can never be imported client side — see the policy-module rule above. |
+| `open-sse/handlers/chatCore.js`'s 401 block and `open-sse/executors/base.js` | Known limitations — the refresh path `tokenstat` deliberately does not observe. `chatCore.js` calls `executor.refreshCredentials` directly, so the result never passes `mergeRefreshedCredentials` and its failure branch is a `log.warn` and nothing else. If upstream ever routes that block through `checkAndRefreshToken`, the gap closes for free — check whether it did. |
+| `src/lib/db/repos/connectionsRepo.js` | Checklist 23. `updateProviderConnection` merges `{ ...existing, ...data }` with no whitelist, which is the only reason `tokenRefreshAttempt` round-trips through the `data` blob without being declared anywhere. `OPTIONAL_FIELDS` is a whitelist in `createProviderConnection` only; extending it to the update path drops the field silently, and the status line reverts to reporting upstream's `lastRefreshAt` with no outcome — a plausible-looking display, not an error. |
+| `src/app/api/providers/route.js` | Two ways. It publishes `tokenRefreshAttempt` whether the fork likes it or not, which is what makes the write-point reduction load-bearing (see the record-fields rule). And it blanks `refreshToken`, which is why eligibility cannot be decided in the browser and `/api/token-status` exists at all. Narrowing it to a whitelist would break far more than this feature; widening it to leak `refreshToken` would make the extra route pointless but harm nothing the fork owns. |
+| `src/shared/utils/index.js` | `TokenStatus.js` imports `getRelativeTime` from the barrel for past timestamps. Non-ticking and past-only by design, which is why the forward-looking half is formatted locally in that component rather than by a shared helper — there is none. |
 | `src/lib/db/backup.js` | Known limitations — `requestDetails` is excluded from backups |
 | `.gitignore` | Line 49 `logs/*` is the only thing keeping raw dumps out of version control, and line 52 `docs/*` is why this file sits at the repo root. Lose the first and every dump — full prompts, replies, headers — shows up in `git status`, one `git add .` from being published. Neither line was added by the fork. |
 | `src/proxy.js` | Where the guard gets called. `LOCAL_ONLY_PATHS` protects nothing if a request never reaches `dashboardGuard.proxy()` — narrow the routing here and every static check in this file still passes while `/api/logs` and `/api/locks` both answer the world. Only post-merge step 5 catches it. |
@@ -955,17 +1056,295 @@ being inlined into the handler.
 - **No button on media-provider connections**, same divergent-copy reason as the Unlock
   button.
 
+## Feature: tokenstat
+
+What each connection's token is doing — when it last refreshed, whether that worked, and
+when the next refresh is due — as one line inside its row on the Connections list.
+
+### Why it exists
+
+Two of those three questions had no answer anywhere in the UI, and the third had a
+misleading one.
+
+**A failed refresh wrote nothing.** `checkAndRefreshToken` in
+`src/sse/services/tokenRefresh.js` guards its persistence with
+`if (newCreds?.accessToken || newCreds?.apiKey || newCreds?.copilotToken)` and has no
+`else`: the result was discarded, the stale credentials were returned, and the only trace
+was a log line. The same swallowing happens in `backgroundTokenRefresh.js`
+(`"Connection refresh failed (swallowed)"`) and in `chatCore.js`'s 401 block. So a
+connection whose refresh token had been revoked kept reporting `testStatus: "active"`
+indefinitely — until somebody pressed Test or a real request happened to reach it.
+
+That is not hypothetical. On the install this was built against, the first sweep after the
+change recorded an attempt on 365 of 645 connections: 364 succeeded and one failed, and
+that one's due time had passed three days earlier. It had been failing every sweep since,
+showing green the whole time. Measure your own rather than trusting those numbers:
+
+```
+curl -s localhost:20127/api/token-status | grep -o '"ok":[a-z]*' | sort | uniq -c
+```
+
+**Upstream's `lastRefreshAt` cannot fill the gap**, for two independent reasons. It is
+stamped only on success, so it is silent about exactly the case that matters. And it is
+stamped only on the paths that pass through `mergeRefreshedCredentials` — the reactive 401
+refresh hands `executor.refreshCredentials`'s raw result to `onCredentialsRefreshed`, and
+the Test button's `refreshOAuthToken` returns raw provider tokens, so neither normally
+carries the field. It can therefore be arbitrarily older than the truth.
+
+### Design
+
+Three values, three different origins, and only one of them is new data:
+
+| | Source |
+| --- | --- |
+| Last attempt, and its outcome | `tokenRefreshAttempt`, a new field written at the one point every proactive refresh converges on |
+| Next refresh due | Derived at read time from `expiresAt` and upstream's own lead formula. Nothing stored |
+| Eligibility | `authType` plus the presence of a refresh token — the scheduler's own first two conditions |
+
+**The convergence point is app side, so `open-sse/` is untouched.** Every proactive
+refresh in the codebase reaches the network through `checkAndRefreshToken`: the background
+sweep calls it with `{ force: true }` from `refreshOne`, and all six modality handlers call
+it at the top of a request. Writing the outcome there covers both with one edit in one file
+the fork already had reason to own. This is the `locks` move — find the app-side point
+where every path already meets, rather than teaching the engine something new.
+
+Coverage is therefore two of four refresh paths, deliberately:
+
+| Path | Recorded | Why |
+| --- | --- | --- |
+| Background sweep | yes | goes through `checkAndRefreshToken` |
+| Lazy per-request check | yes | same |
+| Reactive 401 retry | **no** | lives in `open-sse/handlers/chatCore.js`, bypasses the app layer entirely |
+| Test button | **no** | `testUtils.js` runs its own refresh and writes `testStatus` / `lastError` instead |
+
+Neither uncovered path is invisible: a 401 refresh failure fails the request, which reaches
+`markAccountUnavailable` and puts red text on the row, and the Test button writes its own
+result to the badge. What they do not do is get labelled as a refresh outcome. Closing
+either would mean editing `open-sse/`, or editing all six modality handlers rather than the
+one place they meet — see this feature's Known limitations below. (No anchor link: four
+sections now carry that heading, so the generated ids are positional and would rot.)
+
+**Nothing in the feature branches on a provider id.** That is the constraint to preserve
+across a merge, and it holds by construction: eligibility reads `authType`, the schedule
+reads upstream's lead table, and the failure reason is whatever upstream's generic layer
+returned. A provider-specific case anywhere here means the fork has started maintaining a
+copy of a table upstream owns.
+
+### The record field
+
+```
+tokenRefreshAttempt: { at, ok, code, detail }
+```
+
+Lands in the existing `data` JSON blob: **no migration, no `SCHEMA_VERSION` bump**, and no
+entry needed in `OPTIONAL_FIELDS` — that list is a whitelist in `createProviderConnection`
+only, while `updateProviderConnection` merges `{ ...existing, ...data }` freely. Checklist
+23 is what pins that.
+
+One nested field rather than four flat ones, for three reasons. `updateProviderConnection`
+merges shallowly, so each write replaces the object wholesale and every record is a
+complete snapshot of one attempt with no stale halves. It cannot collide with upstream's
+flat `lastError` / `errorCode` / `lastErrorAt` / `lastRefreshAt`, which are written by
+entirely different code for entirely different events. And one grep returns the feature's
+whole footprint on the record.
+
+**`ok` is decided by the branch, never recomputed.** `buildRefreshAttempt` takes it as an
+argument and each call site passes a literal, so the recorded outcome cannot disagree with
+the condition that decided whether to persist credentials. The alternative — hoisting
+upstream's condition into a `const` — would have put a second copy of it in fork code and
+changed the line most likely to be retuned upstream.
+
+**`code` and `detail` record what upstream handed back, and nothing more.** Three failure
+shapes exist in `open-sse/services/tokenRefresh/providers.js`:
+
+| Shape | Stored as |
+| --- | --- |
+| `null` | `code: null, detail: null` |
+| `{ error: "unrecoverable_refresh_error", code }` | `code` is upstream's classification, `detail` the provider's own code |
+| `{ error: "invalid_grant" }` | `code` only |
+
+**The first is by far the most common, and the feature has to be honest about it.** Most
+providers return a bare `null` on failure, so for most rows the answer is "failed, at this
+time, reason unavailable". Digging a reason out per provider is exactly the per-provider
+code this feature exists without.
+
+**`permanent` is resolved at read time, not stored.** `resolveTokenRefreshStatus` asks
+upstream's own `isUnrecoverableRefreshError` about the stored `code`. Storing the flag
+would be a derived value that goes wrong the moment upstream retunes which codes count —
+and goes wrong plausibly, since a boolean still reads as a boolean. Resolving on read
+cannot drift from upstream at all, and upstream adding a permanent code upgrades every
+existing record for free.
+
+**`detail` is bounded by `REFRESH_ERROR_DETAIL_MAX` at the write point.** Load-bearing,
+not tidiness: `GET /api/providers` publishes this field, and that route is not
+loopback-only. Every shape upstream produces today is a short code, so the cap only fires
+if upstream starts returning prose — which is precisely the case where an unbounded copy
+could carry a URL or a token fragment onto a public route. See the record-fields entry in
+[Rules that outlive a feature](#rules-that-outlive-a-feature).
+
+### The two branches — most likely to conflict
+
+`recordRefreshAttempt` is called once from each branch of the `if` in
+`checkAndRefreshToken`, and both properties of that arrangement are worth recognising in a
+diff:
+
+- **Symmetric.** One writer, two call sites, identical shape. Recording only failures
+  would leave a stale error on screen after a later success; recording only successes
+  would make "never attempted" and "attempted and failed" indistinguishable.
+- **After the credential write, never before.** The success branch persists credentials
+  first and records the attempt last. The reverse order can leave a record claiming
+  success while the credentials that justify it were never stored.
+
+It is fail-open and quiet by design: a write error is logged at debug and swallowed,
+because a dashboard detail must not be the reason a token refresh reports failure. The
+visible cost is a status line that stops updating; the cost of the alternative is a working
+refresh that looks broken.
+
+There is no throttle. A connection that is past expiry attempts a refresh on every request
+that touches it, so a failing one under load writes this field repeatedly. Upstream already
+makes a network call per request in that situation, which dominates a local write, and a
+throttle would mean module state and a second opinion about time.
+
+### Eligibility, and the three things a row can say
+
+`isRefreshEligible` mirrors three of the sweep's four conditions: `isActive`, `authType`
+(including its `.toLowerCase().replace(/_/g, "")` normalisation) and a truthy
+`refreshToken`. The fourth — a non-null expiry — becomes the `scheduled` flag instead of
+part of eligibility, because those two states need different words:
+
+| | Row shows |
+| --- | --- |
+| Not eligible | nothing at all. API-key and cookie connections are untouched, and so are disabled ones |
+| Eligible, no expiry on the record | the last attempt and its outcome, and "refreshes on demand" — the sweep never selects it, but a request still can |
+| Eligible, expiry present | all three values |
+
+A due time already in the past is not an error and is not styled as one: the sweep fires on
+its next tick, so the line reads "refresh due".
+
+**`isActive` is why this is three conditions and not two, and it was missed on the first
+pass.** It is not in `selectConnectionsNeedingRefresh` — it is the filter on the list handed
+to that function, `getProviderConnections({ isActive: true })` in `loadActiveConnections`.
+A mirror built by reading the selector alone showed a disabled OAuth connection a due time
+for a refresh that could not happen. It belongs in eligibility rather than in `scheduled`
+because the request path filters on `isActive` as well
+(`src/sse/services/auth.js`), so **neither** path refreshes a disabled connection and
+"refreshes on demand" would have been just as untrue as naming a time.
+
+Excluding it outright also matches the row's own convention: `ConnectionRow` already hides
+`CooldownTimer` and `lastError` behind `connection.isActive !== false`, and the `disabled`
+badge already says what the row's state is. Nothing is lost — `tokenRefreshAttempt` stays on
+the record, so re-enabling the connection brings the line back with its history.
+
+### The read route
+
+`GET /api/token-status`, no parameters, answering `{ statuses: { <connectionId>: status } }`
+with an entry for every connection — ineligible ones included, as a bare
+`{ eligible: false }`, so the UI can tell "no token to refresh" apart from "not in the
+response".
+
+**A route was unavoidable, and for a different reason than `locks` needed one.** Two of the
+three inputs cannot reach the browser. The per-provider lead comes from `getRefreshLeadMs`,
+whose `REFRESH_LEAD_MS` table is derived from `PROVIDER_OAUTH` and so drags the provider
+registry in; and eligibility needs `refreshToken`, which `GET /api/providers` blanks. The
+alternative — writing upstream's lead numbers down in client-safe code — is what the
+fork-wide rule against copying upstream constants forbids.
+
+It names every field it emits instead of spreading the record. That, not a filter applied
+afterwards, is what keeps credentials out: `GET /api/providers` takes the other approach and
+has to remember four keys to blank.
+
+**No `LOCAL_ONLY_PATHS` entry, unlike `/api/logs` and `/api/locks`.** Every value it returns
+is derived from fields `GET /api/providers` already publishes, `proxy()` applies
+deny-by-default to `/api/*`, so this path inherits exactly that route's posture with no
+entry at all. A loopback entry would not change what is reachable — the record publishes
+`tokenRefreshAttempt` regardless — and a guard that protects nothing invites relying on it.
+The control that does work is the write-point reduction.
+
+Worth knowing while reading `dashboardGuard.js`: `PROTECTED_API_PATHS` is declared and
+never read. It looks like the thing protecting `/api/providers`; the deny-by-default branch
+in `proxy()` is what actually does.
+
+### Settings
+
+**None.** `locks` added settings because a behaviour needed tuning; there is no behaviour
+here, only a display. The one number the feature owns, `REFRESH_ERROR_DETAIL_MAX`, is a
+safety bound rather than a preference. So `settingsRepo.js` and
+`src/app/api/settings/route.js` are both outside this feature, and checklist 8 stays a
+`logs` and `locks` item.
+
+### Deliberately untouched
+
+- **`open-sse/` in its entirety.** No edit anywhere, including the 401 block that would
+  have closed the coverage gap.
+- **Upstream's `lastRefreshAt`.** Stamping it on failure was the obvious shortcut and would
+  have been a real behaviour change: `isCodexRefreshStale` reads it to decide whether to
+  refresh codex proactively, so a failure-stamp would reset a staleness clock that nothing
+  had actually reset. It stays success-only and is read only as a fallback.
+- **`updateProviderCredentials`'s whitelist.** Routing the attempt through it would have
+  meant widening an upstream function for a field only the fork reads — and a failed
+  refresh has no credentials to hand it anyway.
+- **Section 2 of `checkAndRefreshToken`**, the GitHub Copilot second-hop refresh. A
+  different credential with its own expiry; recording it in the same field would make a
+  Copilot failure read as an OAuth failure on a connection whose OAuth refresh had just
+  succeeded.
+- **`CooldownTimer`.** Not reused. Its orange clock means cooldown, and a per-second tick
+  would claim a precision the sweep interval does not have.
+- **`ConnectionsCard.js`**, the divergent copy — same reason as the Unlock and Test buttons.
+- **`src/dashboardGuard.js`.** The only fork feature that adds a route and does not touch
+  it. Reasoning under [The read route](#the-read-route).
+
+### Known limitations
+
+- **Two of the four refresh paths are not observed** — the reactive 401 retry and the Test
+  button. Both leave their own traces (`markAccountUnavailable`'s red text, the test badge)
+  so neither is invisible, but a refresh that happened on one of them does not move
+  `attempt.at`. The consequence to recognise: on a busy connection the recorded attempt can
+  be older than the last real refresh. It is never *newer*, so a stale-looking line is the
+  failure direction, not a false green.
+- **Most failures have no reason.** See the shape table above. `code` and `detail` are
+  populated for the classified permanent cases and empty for everything else.
+- **The next refresh is a due time, not a schedule.** The sweep runs on its own interval,
+  so the refresh happens on the first tick after the moment shown. No interval is quoted
+  here because `DEFAULT_INTERVAL_MS` in `backgroundTokenRefresh.js` is not exported — read
+  it there. The line is coarse (`in ~35m`) for the same reason.
+- **A connection with no stored expiry is never refreshed proactively at all**, so its line
+  says "refreshes on demand". That is upstream's behaviour, not a gap in the display:
+  `selectConnectionsNeedingRefresh` skips such records outright.
+- **A disabled connection shows no line**, even though its token and its recorded attempt
+  are both still there. Neither refresh path touches a disabled connection, so every
+  phrasing available would have been false. Re-enable it and the line returns with its
+  history. The trap to know: **the absence of a line is not evidence of anything** — it
+  means API-key, cookie, disabled, or no refresh token, and the row does not distinguish
+  them. Read `/api/token-status` if you need to know which.
+- **The scheduler's real next-tick time is not knowable from the data.** Its interval handle
+  is process-local, and a restart resets the cycle, so what is shown is computed from
+  `expiresAt` rather than read from anything.
+- **No history.** One attempt is stored, overwritten by the next. No counter, no streak, no
+  ring buffer — enough to answer "is this connection healthy right now?" and nothing more.
+- **The status is fetched with the connection list and does not poll.** It refreshes when
+  the page does. A row that started failing a minute ago still shows its previous state
+  until something refetches.
+- **A failed `/api/token-status` fetch hides every line** rather than showing an error. The
+  state stays an empty map, which renders identically to a list where nothing is eligible.
+  Diagnose it from the network tab, not the row.
+- **Nothing on media-provider connections**, same divergent-copy reason as the two buttons.
+- **The field is carried into safety backups**, unlike the `logs` feature's data.
+  `src/lib/db/backup.js` copies every table except `requestDetails`, and
+  `providerConnections` is copied whole including its `data` blob — so a restored backup
+  brings back whatever attempt was recorded when it was taken. Harmless, and worth knowing
+  before reading an old timestamp as current.
+
 ## Upstream merge checklist
 
 Runs once for the whole fork. Feature tags are there so an entry can be dropped along
 with its feature, not so the list can be split up.
 
-**`node scripts/fork-check.mjs` runs items 1 to 19 and prints pass/fail for each**, so use
-that rather than typing nineteen greps. What it cannot do is repair anything, or settle the
-three items that need a human reading code rather than counting lines — items 4, 7 and 17,
-which it reports as *to read* rather than passing. The commands stay quoted below because
-they are the readable form of each assertion, and because a failing item is easier to
-understand by running its own grep than by reading the script.
+**`node scripts/fork-check.mjs` runs items 1 to 24 and prints pass/fail for each**, so use
+that rather than typing twenty-four greps. What it cannot do is repair anything, or settle
+the four items that need a human reading code rather than counting lines — items 4, 7, 17
+and 23, which it reports as *to read* rather than passing. The commands stay quoted below
+because they are the readable form of each assertion, and because a failing item is easier
+to understand by running its own grep than by reading the script.
 
 **When a check fails, the fork follows the writer, not the other way round.** Items 4,
 5, 6 and 10 all watch a value that upstream owns — a directory layout, a filename, a
@@ -1229,7 +1608,121 @@ reader is the cheaper side to move.
     Expect one hit. If upstream renames the field, `runConnectionTest` reports every test
     as failed.
 
-19. **All features:** both tables still match reality — the inventory for edited files,
+19. **[tokenstat] `checkAndRefreshToken` is still the one point every proactive refresh
+    passes through.** The whole feature records outcomes there and nowhere else, so a path
+    that stops going through it stops being reported — silently, and looking exactly like a
+    connection that is no longer being refreshed.
+
+    ```
+    git grep -nF --untracked "checkAndRefreshToken(" -- src
+    ```
+
+    Expect 9 hits across 8 files: the definition in `src/sse/services/tokenRefresh.js`, the
+    `{ force: true }` call in `backgroundTokenRefresh.js`'s `refreshOne`, and seven lazy
+    call sites across the six modality handlers (`videoGeneration.js` has two).
+
+    **Include the opening parenthesis.** A bare name matches nineteen lines: these 9, plus
+    six static `import` lines, the dynamic destructure in `backgroundTokenRefresh.js`, two
+    prose mentions in fork comments and one in `src/lib/oauth/providers/grok-cli.js`. Ten of
+    those move whenever anyone edits a comment or reorders an import. With the parenthesis
+    the count is call sites and the definition, which is what the item is about.
+
+    A drop to 8 means a modality handler stopped refreshing on the request path. Losing the
+    `backgroundTokenRefresh.js` line specifically is the expensive one: proactive refresh is
+    where nearly every recorded attempt comes from.
+
+20. **[tokenstat] The due-time formula still agrees with `selectConnectionsNeedingRefresh`.**
+    `resolveRefreshLeadMs` mirrors that function's
+    `Math.max(getRefreshLeadMs(provider), BACKGROUND_REFRESH_LEAD_MS)`, and
+    `resolveNextRefreshDueAt` inverts its `expiresAtMs - nowMs < leadMs` test. Both operands
+    are imported rather than written down, so upstream retuning the floor needs no edit here
+    and removing the export is a build failure.
+
+    ```
+    git grep -n --untracked "BACKGROUND_REFRESH_LEAD_MS" -- src
+    ```
+
+    Expect 7 hits across 2 files: four in `backgroundTokenRefresh.js` (the definition, the
+    docblock, the `Math.max`, the startup log line) and three in `tokenRefreshStatus.js`
+    (a docblock mention, the import, the use).
+
+    Then confirm the sweep still applies **exactly four** conditions, and note that they
+    live at **two levels** — this is the part that is easy to read wrongly, and the fork
+    got it wrong first time round:
+
+    | Condition | Where |
+    | --- | --- |
+    | `authType` normalised to `oauth` | inside `selectConnectionsNeedingRefresh` |
+    | truthy `refreshToken` | inside `selectConnectionsNeedingRefresh` |
+    | non-null `getCredentialExpiryMs` | inside `selectConnectionsNeedingRefresh` |
+    | `isActive` | **not in that function** — it is the filter on the list handed to it, `getProviderConnections({ isActive: true })` in `loadActiveConnections` |
+
+    A fifth condition anywhere in that path is the quiet failure: the sweep skips
+    connections the fork still shows a due time for, so the row promises a refresh that
+    never arrives, and no count above can see it. Read the caller as well as the function —
+    reading only `selectConnectionsNeedingRefresh` is exactly how the `isActive` condition
+    was missed.
+
+    `isActive` is worth extra care because **the request path filters on it too**
+    (`getProviderConnections({ provider, isActive: true })` in `src/sse/services/auth.js`).
+    A disabled connection is refreshed by neither path, which is why `isRefreshEligible`
+    excludes it outright instead of reporting it as merely unscheduled.
+
+21. **[tokenstat] `getRefreshLeadMs` is still exported, and `REFRESH_LEAD_MS` still derived
+    from the registry rather than written down.** The derivation is what makes a provider's
+    declared lead reach the fork with no edit — and also why this module can never move
+    client side.
+
+    ```
+    git grep -nE "\bREFRESH_LEAD_MS\b" -- open-sse
+    ```
+
+    Expect 4 hits across 2 files: the definition in `open-sse/config/appConstants.js` and
+    three in `open-sse/services/tokenRefresh.js` (the import and two reads inside
+    `getRefreshLeadMs`). Confirm the definition is still built from `PROVIDER_OAUTH`; a
+    hand-written table there would still work, but a provider added without an
+    `oauth.refreshLeadMs` would then quietly fall back to the background floor.
+
+    **Use the word boundaries.** Without them this also matches
+    `BACKGROUND_REFRESH_LEAD_MS`, which is a different constant in a different layer.
+
+22. **[tokenstat] `isUnrecoverableRefreshError` is still the single source of the
+    "re-authenticate" distinction.** The fork stores upstream's classification code and asks
+    this function about it at read time, so upstream adding a permanent code upgrades every
+    stored record for free and removing the export is a build failure.
+
+    ```
+    git grep -n "isUnrecoverableRefreshError" -- open-sse
+    ```
+
+    Expect 3 hits across 2 files: the definition in `open-sse/services/tokenRefresh.js`, and
+    the import plus the early return in `oauthCredentialManager.js`. Scope it to `open-sse`
+    — widening to `src` adds fork comment mentions that move with any edit.
+
+    Then confirm the four codes are still listed: `unrecoverable_refresh_error`,
+    `refresh_token_reused`, `invalid_request`, `invalid_grant`. A code dropped from that list
+    turns a permanent failure into a generic one, and the row stops telling you to log in
+    again.
+
+23. **[tokenstat] `updateProviderConnection` still merges the whole object, and the stored
+    detail is still reduced.** Two independent things, both about the field surviving
+    correctly rather than plausibly.
+
+    ```
+    git grep -n "OPTIONAL_FIELDS" -- src/lib/db/repos/connectionsRepo.js
+    ```
+
+    Expect 2 hits: the declaration and the one loop inside `createProviderConnection`. A
+    third use means it became a whitelist on the update path too, which drops
+    `tokenRefreshAttempt` without an error — the status line then falls back to upstream's
+    `lastRefreshAt` with no outcome, which looks like a working display.
+
+    The half that needs reading: `buildRefreshAttempt` must keep passing both `code` and
+    `detail` through `reduceDetail`, bounded by `REFRESH_ERROR_DETAIL_MAX`. `GET
+    /api/providers` publishes this field to anyone who can reach the dashboard, so an
+    unbounded copy of a provider error body is a leak that no count here can detect.
+
+24. **All features:** both tables still match reality — the inventory for edited files,
     and "What upstream can break" for the ones the fork only depends on. The grep
     covers the first; the second needs reading, so check it whenever a new import or
     `fetch` is added to fork code.
@@ -1238,43 +1731,60 @@ reader is the cheaper side to move.
     git grep -l --untracked "FORK(" -- open-sse src
     ```
 
-    Expect twenty-two files. Use the bare prefix, not one feature's tag — three files
-    carry two tags, so per-feature greps overlap and none of them is the whole fork. The
-    two untagged added files are outside this count by design; see the inventory.
+    Expect twenty-six files. Use the bare prefix, not one feature's tag — three files
+    carry more than one tag, so per-feature greps overlap and none of them is the whole
+    fork. The per-feature counts sum to thirty-one, not twenty-six: one file carries two
+    tags and two carry three. The two untagged added files are outside this count by
+    design; see the inventory.
 
-20. **Update the expected counts in items 1 to 18 if upstream legitimately changed
+25. **Update the expected counts in items 1 to 23 if upstream legitimately changed
     them — in this file *and* in `scripts/fork-check.mjs`.** Those numbers are assertions
     about upstream's code, so they go stale by design: a mismatch is an invitation to look,
     not proof of breakage. Once you have confirmed the new shape is correct, write the new
-    count into both places. Nobody else owns them: item 19 covers the two tables and item
-    21 covers the tests, so a stale count here silently degrades into a check that always
+    count into both places. Nobody else owns them: item 24 covers the two tables and item
+    26 covers the tests, so a stale count here silently degrades into a check that always
     fails and gets skipped.
 
-    **The script is a second copy of every number in items 1 to 19, and nothing compares
-    the two.** That is the price of having one command instead of nineteen greps; the
+    **The script is a second copy of every number in items 1 to 24, and nothing compares
+    the two.** That is the price of having one command instead of twenty-four greps; the
     failure mode is a script that passes while this document says something else, so update
     them in the same commit. If they ever disagree, the document is the source — the script
     is only its executable form.
 
-21. Re-run lint, build, the test comparison and the post-merge check below.
+    **Renumbering is part of the job.** New feature items go before the all-features and
+    procedural ones, so adding a feature shifts the tail. When it does, the numbers to chase
+    are: this document's "items 1 to N" phrases in the merge steps at the top, the checklist
+    intro, and items 24 and 25; and in `scripts/fork-check.mjs`, the item count in the header
+    comment, the `MANUAL_ITEMS` ids, and the per-feature array inside item 24's check.
+
+26. Re-run lint, build, the test comparison and the post-merge check below.
 
 ## Verifying
 
 ```
 npx eslint .
-npm run build          # /api/logs/records, /api/logs/session/[name] and /api/locks/reset
-                       # in the route list
+npm run build          # /api/logs/records, /api/logs/session/[name], /api/locks/reset
+                       # and /api/token-status in the route list
 ```
 
 A plain checkout reports around 135 eslint errors, all inherited from upstream
-(`react-hooks/set-state-in-effect` in `src/shared/hooks/useModelCaps.js` and friends).
+(the two largest rules being `import/no-anonymous-default-export` and
+`react-hooks/set-state-in-effect`, the latter concentrated in
+`src/shared/components/ModelSelectModal.js` and in the tool cards under
+`src/app/(dashboard)/dashboard/cli-tools/components/` — `ClaudeToolCard.js`,
+`HermesToolCard.js`, `DroidToolCard.js`, `OpenClawToolCard.js`).
 Lint the fork's own files to get a clean signal.
 
 **Lint the added files and the modified ones separately.** The added files must come back
 completely clean; the modified ones carry upstream's pre-existing errors, so the only
 useful question there is whether the count changed. Stash the fork's edits to those files
 and lint them again to get the before number — `src/app/(dashboard)/dashboard/providers/[id]/page.js`
-and `ConnectionRow.js` together report three errors and one warning either way.
+and `ConnectionRow.js` together report three errors and one warning either way: the three
+errors are `react-hooks/set-state-in-effect` in `page.js`, and the **warning is in
+`ConnectionRow.js`**, `react-hooks/exhaustive-deps`. Expect both line numbers to move
+rather than the counts — the fork adds lines above each. Adding
+`src/sse/services/tokenRefresh.js` to the same command changes nothing because that file
+is clean, and so are the other twelve modified files.
 
 `react-hooks/set-state-in-effect` is the rule a new component will trip. The shape that
 passes is an async IIFE inside the effect guarded by a `cancelled` flag, never a
@@ -1331,11 +1841,12 @@ parsing data blobs` and `oversized field → stored truncated + reparseable (no 
 ### Post-merge check
 
 Lint, build and tests are all static or unit level; none of them proves the feature
-still works end to end. Eight checks do, against a running instance — substitute your
+still works end to end. Eleven checks do, against a running instance — substitute your
 port, and note that `/api/logs` and `/api/locks` only answer on loopback, which is what
 step 5 tests.
 
-Steps 1 to 5 cover `logs`, steps 6 and 7 cover `locks`, step 8 covers `conntest`.
+Steps 1 to 5 cover `logs`, steps 6 and 7 cover `locks`, step 8 covers `conntest`, steps
+9 to 11 cover `tokenstat`.
 
 **Steps 2 to 4 need at least one row in `requestDetails`.** On an empty table they are
 not merely uninformative, they read as failures: step 4 counts zero because there is
@@ -1381,8 +1892,10 @@ Expect `name`, `sourceFormat`, `targetFormat`, `model`, `timestamp` and a `stage
 array: five to seven entries when the provider answered successfully, four when it
 answered with an error, fewer still if the request never got that far. Confirm
 `4_req_target.json` is present rather than counting entries — that is the stage which
-means the provider was reached. See "Stage count varies per row" under
-[Known limitations](#known-limitations) before reading a short array as a fault. No
+means the provider was reached. Read "Stage count varies per row" under the `logs`
+feature's own "Known limitations" before treating a short array as a fault. (Named
+rather than linked: four sections carry that heading, so its generated id is positional
+and would retarget the moment a feature is added or reordered.) No
 `outcome` key — that belongs to the list endpoint alone. Confirm a `headers` object shows `<redacted>` rather than a live token: since
 the reader does not mask, this is reading the file itself, so it is the real check on
 checklist item 2 and the reason to run it after every merge.
@@ -1402,6 +1915,12 @@ curl -s -o /dev/null -w '%{http_code}\n' http://<lan-ip>:20127/api/logs/records
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://<lan-ip>:20127/api/locks/reset
 curl -s -o /dev/null -w '%{http_code}\n' http://<lan-ip>:20127/api/usage/request-details
 ```
+
+**The Host-header alternative only discriminates under `next dev`.** Under `npm start`
+`custom-server.js` stamps the peer address and `isLoopbackPeer` reads that instead, so a
+spoofed Host is ignored and a loopback caller gets 200 where this step expects 403 — a
+false alarm that sends you hunting a guard that never broke. Use a real non-loopback
+address there.
 
 Expect **403, 403, then 200**. All three matter. A 403 on the first two alone could mean
 the whole dashboard is unreachable from there, which proves nothing about
@@ -1481,3 +2000,77 @@ Then open the logs tab itself at `/dashboard/usage?tab=inspector`, since the ste
 nothing about the components `LogsTab` borrows from `src/shared/components`. Empty
 provider or account columns with rows otherwise present is the signature of a changed
 response shape on `/api/usage/providers`, `/api/provider-nodes` or `/api/providers`.
+
+```
+# 9. The status endpoint answers, discriminates, and leaks nothing.
+curl -s localhost:20127/api/token-status | head -c 400
+```
+
+Expect a `statuses` object keyed by connection id. Judge it on three things, structurally:
+
+- **The key set per entry is exactly** `eligible`, `scheduled`, `nextRefreshDueAt`,
+  `attempt`, `lastRefreshAt` — and for an ineligible connection, `eligible` alone. An extra
+  key means something started spreading the record instead of naming fields.
+- **Both kinds of entry are present, and eligibility discriminates on the right things.**
+  Cross-check against `/api/providers` rather than eyeballing the totals:
+
+  ```
+  # every disabled connection must be eligible:false — the condition that was missed once
+  curl -s localhost:20127/api/providers | grep -c '"isActive":false'
+  ```
+
+  Then confirm no connection is both `isActive: false` and `eligible: true`, and none with
+  a non-`oauth` `authType` is eligible. **The totals alone will not tell you this.** An
+  install can have zero API-key connections, in which case `authType` is untestable here;
+  and the disabled set can coincide with the no-refresh-token set, in which case adding or
+  removing the `isActive` condition does not move the count at all. Both were true of the
+  install this was built on, which is why the assertion is per connection and not a
+  subtraction. All entries eligible means the predicate stopped discriminating; all
+  ineligible means it stopped seeing `refreshToken`, which the route reads from the
+  repository precisely because `GET /api/providers` blanks it.
+- **No credential appears anywhere in the payload.** Grep it for `accessToken`,
+  `refreshToken` and `apiKey` and expect nothing. This is the real check on the route naming
+  its fields rather than filtering afterwards.
+
+```
+# 10. Attempts are actually being recorded.
+curl -s localhost:20127/api/token-status | grep -o '"ok":[a-z]*' | sort | uniq -c
+```
+
+Needs one sweep to have run since the server started, so give it the initial delay plus a
+tick. Expect a non-zero count of `"ok":true`. Zero attempts recorded at all, with eligible
+connections present, points at checklist 19 — something stopped going through
+`checkAndRefreshToken` — or at the scheduler not running, which
+`DISABLE_BACKGROUND_TOKEN_REFRESH` also causes.
+
+**Judge the schedule structurally, not by eye.** Pick one entry with a recorded success and
+confirm `attempt.at` equals `lastRefreshAt`: the same refresh wrote both, so a disagreement
+means one of the two writes is not landing. Then confirm
+`nextRefreshDueAt − attempt.at` equals the token's lifetime minus
+`resolveRefreshLeadMs(provider)`. A wall-clock impression cannot check this — the two
+plausible answers, a provider's own lead and `BACKGROUND_REFRESH_LEAD_MS`, are close enough
+to look alike.
+
+A failing entry is worth reading rather than treating as a fault: `ok: false` with
+`code: null` is the normal shape, because most providers return a bare `null`. An overdue
+`nextRefreshDueAt` alongside it is the exact condition this feature was built to surface.
+
+Then open `/dashboard/providers/<provider>` and check the list:
+
+- An OAuth row shows a `Token:` line; an API-key or cookie row shows none. Present on every
+  row means eligibility stopped discriminating; absent everywhere means the fifth fetch in
+  `fetchConnections` is failing, which is silent by design — read the network tab.
+- The line names a time, not `Invalid Date` or `NaN`. That is what a changed `expiresAt`
+  format would produce, and `getCredentialExpiryMs` is the only thing normalising it.
+- A row with a recorded failure shows the failure half in red, and a permanent one says
+  re-authentication rather than a code.
+
+```
+# 11. Upstream's own stamp is still intact, since the fork reads it as a fallback.
+curl -s localhost:20127/api/providers | grep -c '"lastRefreshAt"'
+```
+
+Non-zero on an install with OAuth connections. This is not a `tokenstat` field — it is
+upstream's, and the fork deliberately does not write it. Zero means upstream stopped
+stamping it, which costs the fallback for connections with no recorded attempt but nothing
+else; a row would then read "no refresh recorded yet" until the next sweep.
