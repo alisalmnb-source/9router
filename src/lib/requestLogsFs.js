@@ -47,10 +47,14 @@ const MAX_FILE_BYTES = 2 * 1024 * 1024;
 // Markers that prove a streamed response finished, rather than the transcript
 // merely having received its first chunk.
 //
-// Do not reduce this to `[DONE]`. open-sse/utils/stream.js appends that only when
-// `!streamDoneSent && !isGeminiFamily`, so a complete OpenAI chat-completions
-// stream can end without one — its last chunk carries `"finish_reason":"stop"`
-// and a usage block instead.
+// Do not reduce this to `[DONE]`. open-sse/utils/stream.js has three sites that
+// append that sentinel and a plain OpenAI chat-completions stream on the
+// translate path hits none of them: two are gated on keepsOpenAIResponsesFormat
+// (Responses API in AND out), and the third is the terminator at the end of the
+// PASSTHROUGH branch of flush, which returns before the translate path runs.
+// (That third one is the only site the !isGeminiFamily guard covers — do not read
+// the guard as the reason this list is wide.) So such a stream ends with its last
+// chunk carrying `"finish_reason":"stop"` and a usage block, and nothing else.
 const STREAM_TERMINATORS = ["[DONE]", "response.completed", "message_stop"];
 
 // A non-null finish reason in any format: OpenAI's `finish_reason` (stop, length,
@@ -446,7 +450,8 @@ export function readSession(name) {
 /**
  * Delete the oldest session directories until at most maxCount remain.
  *
- * This is the only function in the fork that removes files, so it is
+ * This is the only fork-added code that removes files (upstream deletes in
+ * src/mitm/*, src/lib/db/backup.js, src/lib/tunnel/* and elsewhere), so it is
  * deliberately narrow:
  *   - operates only on first-level children of resolveLogsDir()
  *   - only on entries that are real directories (symlinks are skipped)

@@ -6,9 +6,16 @@ import PropTypes from "prop-types";
 import { Badge, Toggle, Tooltip } from "@/shared/components";
 import CooldownTimer from "./CooldownTimer";
 
-export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null }) {
+// FORK(conntest): onTest / testBusy.
+// FORK(locks): onResetLock.
+export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst, isLast, onMoveUp, onMoveDown, onToggleActive, onUpdateProxy, onEdit, onDelete, oneByOneStatus = null, autoPing = null, onTest = null, testBusy = false, onResetLock = null }) {
   const [showProxyDropdown, setShowProxyDropdown] = useState(false);
   const [updatingProxy, setUpdatingProxy] = useState(false);
+  // FORK(locks): local, like updatingProxy above — the parent has nothing else to do
+  // with this state. Cleared in handleResetLock's finally block. The refetch that the
+  // parent runs afterwards is what removes the button itself, by flipping
+  // hasClearableLock; the two are separate and neither substitutes for the other.
+  const [resettingLock, setResettingLock] = useState(false);
   const proxyDropdownRef = useRef(null);
 
   const proxyPoolMap = new Map((proxyPools || []).map((pool) => [pool.id, pool]));
@@ -69,6 +76,15 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     }
   };
 
+  const handleResetLock = async () => {
+    setResettingLock(true);
+    try {
+      await onResetLock();
+    } finally {
+      setResettingLock(false);
+    }
+  };
+
   const rowAuthType = connection.authType || (isOAuth ? "oauth" : "apikey");
   const isOAuthConnection = rowAuthType === "oauth";
   const isCookieConnection = rowAuthType === "cookie";
@@ -117,6 +133,12 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
     : connection.testStatus;
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
+
+  // FORK(locks): the button appears only when there is something to clear. An expired
+  // lock still leaves lastError on the row until a real request succeeds, so lastError is
+  // part of the condition rather than isCooldown alone. Declared here because isCooldown
+  // is only initialised above this point.
+  const hasClearableLock = isCooldown || !!connection.lastError;
 
   const getOneByOneVariant = () => {
     if (!oneByOneStatus) return "default";
@@ -212,6 +234,37 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
       </div>
       <div className="flex w-full items-center justify-between gap-2 sm:w-auto sm:justify-end">
         <div className="grid flex-1 grid-cols-3 gap-1 sm:flex sm:flex-none">
+          {/* FORK(conntest): same endpoint the Edit modal and the one-by-one run use.
+              The result lands in the parent's oneByOneResults, so the badge next to the
+              connection name renders it with no extra display code. */}
+          {onTest && (
+            <button
+              onClick={onTest}
+              disabled={testBusy}
+              className="flex w-full flex-col items-center rounded px-2 py-1 text-text-muted transition-colors hover:bg-black/5 hover:text-primary disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-white/5"
+            >
+              <span className={`material-symbols-outlined text-[18px] ${testBusy ? "animate-spin" : ""}`}>
+                {testBusy ? "progress_activity" : "network_check"}
+              </span>
+              <span className="text-[10px] leading-tight">Test</span>
+            </button>
+          )}
+          {/* FORK(locks): clears every modelLock_* on this connection plus the error
+              state. Conditional, so a healthy row stays uncluttered. */}
+          {onResetLock && hasClearableLock && (
+            <Tooltip text="Clear this connection's cooldowns and error state">
+              <button
+                onClick={handleResetLock}
+                disabled={resettingLock}
+                className="flex w-full flex-col items-center rounded px-2 py-1 text-orange-500 transition-colors hover:bg-orange-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <span className={`material-symbols-outlined text-[18px] ${resettingLock ? "animate-spin" : ""}`}>
+                  {resettingLock ? "progress_activity" : "lock_open"}
+                </span>
+                <span className="text-[10px] leading-tight">Unlock</span>
+              </button>
+            </Tooltip>
+          )}
           {/* Proxy button with inline dropdown */}
           {(proxyPools || []).length > 0 && (
             <div className="relative" ref={proxyDropdownRef}>
@@ -315,4 +368,9 @@ ConnectionRow.propTypes = {
     onToggle: PropTypes.func,
     provider: PropTypes.string,
   }),
+  // FORK(conntest)
+  onTest: PropTypes.func,
+  testBusy: PropTypes.bool,
+  // FORK(locks)
+  onResetLock: PropTypes.func,
 };

@@ -14,6 +14,9 @@ import { useModelCaps } from "@/shared/hooks/useModelCaps";
 import { translate } from "@/i18n/runtime";
 import { fetchSuggestedModels } from "@/shared/utils/providerModelsFetcher";
 import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels";
+// FORK(conntest): shared wrapper around POST /api/providers/<id>/test — adds the
+// timeout that route has no server-side equivalent for.
+import { runConnectionTest } from "@/shared/utils/connectionTest";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -703,6 +706,42 @@ export default function ProviderDetailPage() {
     setOneByOneStopping(true);
   };
 
+  // FORK(conntest): per-row test. Writes into oneByOneResults so the badge beside the
+  // connection name renders the outcome with no second display path.
+  //
+  // Deliberately does not reuse or refactor handleRunOneByOneTest above. Routing that
+  // loop through runConnectionTest would remove upstream's duplicate fetch, but it would
+  // also put a function this fork rewrote onto the merge-conflict surface for no visible
+  // gain. The duplication that remains is upstream's, and upstream maintains it.
+  const handleTestConnection = async (connectionId) => {
+    setOneByOneResults((prev) => ({
+      ...prev,
+      [connectionId]: { state: "testing", error: null },
+    }));
+    const { valid, error } = await runConnectionTest(connectionId);
+    setOneByOneResults((prev) => ({
+      ...prev,
+      [connectionId]: { state: valid ? "success" : "failed", error: valid ? null : error },
+    }));
+  };
+
+  // FORK(locks): /api/locks/reset is in LOCAL_ONLY_PATHS, so this answers on loopback
+  // only — with the dashboard open over a tunnel or Tailscale it returns 403 and the row
+  // simply does not change. Refetch rather than patch local state: the route also resets
+  // testStatus, lastError, errorCode and backoffLevel.
+  const handleResetConnectionLock = async (connectionId) => {
+    try {
+      const res = await fetch("/api/locks/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ connectionId }),
+      });
+      if (res.ok) await fetchConnections();
+    } catch (error) {
+      console.log("Error resetting connection lock:", error);
+    }
+  };
+
   const handleDelete = async (id) => {
     setConfirmState({
       title: "Delete Connection",
@@ -992,6 +1031,9 @@ export default function ProviderDetailPage() {
                 }}
                 onDelete={() => handleDelete(conn.id)}
                 oneByOneStatus={oneByOneResults[conn.id] || null}
+                onTest={() => handleTestConnection(conn.id)}
+                testBusy={oneByOneRunning || oneByOneResults[conn.id]?.state === "testing"}
+                onResetLock={() => handleResetConnectionLock(conn.id)}
               />
             </div>
           </div>

@@ -1,7 +1,9 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
-import { MAX_RATE_LIMIT_COOLDOWN_MS } from "open-sse/config/errorConfig.js";
+// FORK(locks): upstream's MAX_RATE_LIMIT_COOLDOWN_MS is reached through the resolver
+// instead of directly, so an unset setting still yields upstream's own constant.
+import { resolveLockCooldownMs, resolveProviderResetCapMs } from "@/lib/lockPolicy";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import * as log from "../utils/logger.js";
 
@@ -225,18 +227,39 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   // GitHub premium-request exhaustion is account-wide until the next UTC month.
   const githubResetAtMs = githubMonthlyResetMs(status, errorText, provider);
 
+  // FORK(locks): all three cooldown sources below converge on one duration and one
+  // write, which is why the configured durations are applied here rather than inside
+  // open-sse.
+  //
+  // This read is uncached — settingsRepo.getSettings() does a fresh SELECT and JSON
+  // parse every call. That is fine here and the reason is the call site, not a cache:
+  // this function already ran getProviderConnections() above and is about to run a
+  // transactional updateProviderConnection() below, so one single-row read is noise
+  // next to them, and it only happens on a failed attempt. Do not "optimise" it with a
+  // module-level cache: a saved duration would then take effect on a delay, which is
+  // exactly the behaviour the Settings card promises it does not have.
+  //
+  // Fail open to upstream's constants if it throws.
+  const lockSettings = await getSettings().catch(() => ({}));
+
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
   let shouldFallback, cooldownMs, newBackoffLevel;
   if (githubResetAtMs) {
+    // FORK(locks): deliberately not resolved. This branch is an absolute date, not a
+    // duration from the rules table, and upstream leaves it uncapped on purpose.
     shouldFallback = true;
     cooldownMs = githubResetAtMs - Date.now();
     newBackoffLevel = 0;
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
-    cooldownMs = Math.min(resetsAtMs - Date.now(), MAX_RATE_LIMIT_COOLDOWN_MS);
+    cooldownMs = Math.min(resetsAtMs - Date.now(), resolveProviderResetCapMs(lockSettings));
     newBackoffLevel = 0;
   } else {
-    ({ shouldFallback, cooldownMs, newBackoffLevel } = checkFallbackError(status, errorText, backoffLevel));
+    // FORK(locks): upstream still decides which rule fires, whether to fall back, and
+    // the next backoff level. Only the duration is remapped.
+    const classified = checkFallbackError(status, errorText, backoffLevel);
+    ({ shouldFallback, newBackoffLevel } = classified);
+    cooldownMs = resolveLockCooldownMs(classified, lockSettings);
   }
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 

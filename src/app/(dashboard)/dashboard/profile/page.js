@@ -9,6 +9,9 @@ import { cn } from "@/shared/utils/cn";
 import { APP_CONFIG } from "@/shared/constants/config";
 import { LOCALE_COOKIE, normalizeLocale } from "@/i18n/config";
 import { LOCALE_FLAGS } from "@/shared/constants/locales";
+// FORK(locks): self-contained — reads and writes /api/settings itself, so this page
+// only gains an import and the render line below.
+import LockDurationsCard from "./components/LockDurationsCard";
 
 function getLocaleFromCookie() {
   if (typeof document === "undefined") return "en";
@@ -1614,6 +1617,9 @@ export default function ProfilePage() {
             />
           </div>
         </Card>
+
+        {/* FORK(locks): Account Lock Durations */}
+        <LockDurationsCard />
 
         {/* Account actions */}
         <div className="flex flex-col sm:flex-row gap-2">
