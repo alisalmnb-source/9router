@@ -259,8 +259,22 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   // module-level cache: a saved duration would then take effect on a delay, which is
   // exactly the behaviour the Settings card promises it does not have.
   //
-  // Fail open to upstream's constants if it throws.
-  const lockSettings = await getSettings().catch(() => ({}));
+  // Fail open to upstream's constants if it throws. The try/catch wraps the call
+  // itself rather than chaining .catch onto the returned promise, and the difference
+  // is load-bearing: a *synchronous* throw never produces a promise for .catch to
+  // attach to, so it would propagate out of this function instead of falling back.
+  // That is not hypothetical — `tests/unit/github-monthly-usage-lock.test.js` mocks
+  // `@/lib/localDb` without a `getSettings` export, and Vitest throws on reading an
+  // undeclared export of a mocked module. Both of its cases exercise the
+  // githubResetAtMs branch below, which does not even consult these settings, so a
+  // narrower read would hide the problem rather than fix it. Keep the guard here,
+  // where it covers all three branches no matter what a caller's module doubles omit.
+  let lockSettings;
+  try {
+    lockSettings = await getSettings();
+  } catch {
+    lockSettings = {};
+  }
 
   // Provider-specific precise cooldown (e.g. codex usage_limit_reached resets_at) overrides backoff
   let shouldFallback, cooldownMs, newBackoffLevel;

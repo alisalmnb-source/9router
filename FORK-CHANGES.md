@@ -22,7 +22,13 @@ into it.
   [How outcome is decided](#how-outcome-is-decided), because upstream now calls
   `onStreamComplete` from `transform()` as well as from `flush()`, and a new `locks`
   known limitation, because antigravity quota blocks now bypass
-  `markAccountUnavailable` altogether.
+  `markAccountUnavailable` altogether. The test comparison then found the one real
+  regression of this merge, and it predated it: the `locks` settings read failed open
+  only for an *asynchronous* throw, so the two cases in
+  `tests/unit/github-monthly-usage-lock.test.js` — whose `@/lib/localDb` mock omits
+  `getSettings` — took `markAccountUnavailable` down. Fixed by wrapping the call in
+  `try`/`catch`; that test file is now recorded in
+  [What upstream can break](#files-the-fork-depends-on-but-never-edits).
 - Fork point `699edac3`, tag `v0.5.55`. No merges before this.
 
 **Merging right now?** In order:
@@ -170,7 +176,7 @@ line 49, `logs/*`, is what keeps raw dumps out of version control — see the en
 ## Fork inventory
 
 Every file the fork touches, across all features. Fifteen modified, thirteen added,
-**+343 −31** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
+**+357 −31** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
 over the fifteen rows of the Modified table.
 
 ```
@@ -231,7 +237,7 @@ harmless.
 | `src/lib/db/repos/settingsRepo.js` | logs | +9 −1 | `enableObservability` defaults to `true`; new `requestLogsMaxSessions`. |
 | `src/dashboardGuard.js` | logs, locks | +29 | `/api/logs` and `/api/locks` added to `LOCAL_ONLY_PATHS`. Mostly comment: the `/api/locks` entry records what the guard does *not* cover. |
 | `src/app/(dashboard)/dashboard/usage/page.js` | logs | +7 −1 | Registers the tab under the key `inspector`. |
-| `src/sse/services/auth.js` | locks | +33 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. Since `v0.5.59` the `resetsAtMs` branch also carries upstream's antigravity carve-out, which skips the cap rather than the resolver — the conflict landed exactly here, so the resolution is commented in place. |
+| `src/sse/services/auth.js` | locks | +47 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. Since `v0.5.59` the `resetsAtMs` branch also carries upstream's antigravity carve-out, which skips the cap rather than the resolver — the conflict landed exactly here, so the resolution is commented in place. The settings read is wrapped in `try`/`catch` rather than `.catch()`, which two upstream tests depend on — see `tests/unit/github-monthly-usage-lock.test.js` in "What upstream can break". |
 | `src/app/(dashboard)/dashboard/profile/page.js` | locks | +6 | One import, one render line for `LockDurationsCard`. |
 | `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest, tokenstat | +68 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. Then one `tokenStatus` prop and one `<TokenStatus>` line in the info column. |
 | `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +59 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
@@ -346,7 +352,8 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `open-sse/translator/formats.js` | Checklist 4 — a format id containing `_` splits every directory name wrongly. Thirteen ids today and none contains `_`: ten are single lowercase words, three are hyphenated (`openai-responses`, `openai-response`, `gemini-cli`). Read the **values**, not the keys — the keys do use underscores (`OPENAI_RESPONSES`) and never reach a directory name. |
 | `open-sse/utils/stream.js` | "How outcome is decided", steps 2 **and** 3 — two separate dependencies in one file. Step 3: it owns all three `[DONE]` append sites, and the fact that the translate path uses none of them is why the terminal-marker list cannot be narrowed to that one string. A new append site on the translate path would not break anything; losing `finish_reason` from the final chunk would. Step 2: it also decides **when `onStreamComplete` fires**, which is the whole basis for treating a non-placeholder body as proof the stream finished. `v0.5.59` moved that from flush-only to a `finalizeStream()` called from three places, deduplicated by a `finalized` flag — read step 2 for which direction of change breaks the signal, because a count cannot see this one. |
 | `open-sse/transformer/responsesTransformer.js` | Checklist 9 — `createResponsesLogger` has no callers today; wiring it up puts directories in `logs/` that retention will not touch |
-| `src/sse/handlers/chat.js` | Known limitations — its account loop is why rows are per attempt, and why some failures produce no row at all |
+| `src/sse/handlers/chat.js` | Known limitations — its account loop is why rows are per attempt, and why some failures produce no row at all. Also the antigravity bypass in the `locks` known limitations: this file decides whether `markAccountUnavailable` is called at all. |
+| `tests/unit/github-monthly-usage-lock.test.js` | **The only upstream test whose module doubles constrain fork code, and the fork does not edit it.** It mocks `@/lib/localDb` with `getProviderConnections` and `updateProviderConnection` only, and Vitest throws on reading an undeclared export of a mocked module. So the `getSettings()` call the `locks` feature added to `markAccountUnavailable` is reached by a mock that does not provide it, and the guard around that call has to survive a **synchronous** throw — `.catch()` on the returned promise does not, because no promise is created. Both of its cases exercise the `githubResetAtMs` branch, which never consults those settings, so the failure looks unrelated to anything configurable. Upstream adding a mocked export changes nothing; upstream adding *another* test that mocks this module and reaches `markAccountUnavailable` is covered by the same guard. Only the test comparison in [Verifying](#verifying) catches a regression here — no checklist item can. |
 | `src/app/api/settings/route.js` | Checklist 8 — `PATCH` deletes `PROTECTED_SETTING_KEYS` and lets everything else through. Turning that into an allowlist silently drops `requestLogsMaxSessions` and all six `lock*Ms` keys; the Settings card would keep reporting a successful save while every value reverted to upstream's. |
 | `src/app/api/usage/request-details/route.js` | Deliberately untouched — upstream's redaction has to stay as written. Also the reason record fields are treated as public: it forwards everything except the four payloads, and it is not local-only. |
 | `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js` | `LogsTab` carries copies of `getInputTokens`, `getCachedTokens` and `getCacheCreationTokens` from it, on purpose: the two tabs render the same rows, so a different rule in one would show two input-token counts for one request. Change either copy and change both. **Identical logic, not identical text** — `getCachedTokens` and `getCacheCreationTokens` are character-for-character copies, while `getInputTokens` matches only in its executable lines and carries a longer comment here explaining that it is a mirror. So a text diff of the three reports a difference that is not one, and nothing in the checklist can detect a real drift — the numbers stay plausible, they just disagree. |
@@ -1871,19 +1878,36 @@ so every existing failure registers as a regression. `known-fails.txt` is stale
 against this checkout too — the local Vitest version discovers considerably more tests
 than the baseline was recorded with.
 
-Compare the suite against itself instead:
+Compare the suite against itself instead. **`git stash` is the wrong tool once the fork
+is committed** — it captures working-tree and index changes, and a committed fork has
+neither, so the "base" run silently re-measures the fork and the comparison comes back
+empty. Check out upstream's copies of the modified files instead, and restore from
+`HEAD`:
 
 ```
 cd tests && npx vitest run --reporter=json --outputFile=fork.json
-cd .. && git stash push -- <the modified files from the inventory>
+cd .. && git checkout upstream/master -- <the modified files from the inventory>
 cd tests && npx vitest run --reporter=json --outputFile=base.json
-cd .. && git stash pop
+cd .. && git reset -q HEAD -- . && git checkout -- .
 ```
+
+`git checkout <tree> -- <paths>` stages what it writes, which is why the restore needs
+the `reset` as well as the `checkout` — and why `git status` looks clean rather than
+dirty while the base run is in progress. Confirm `src/sse/services/auth.js` actually
+reverted before trusting the base numbers; it is the file the comparison is most about.
+
+**Do not substitute a separate worktree with a junctioned `node_modules`.** It looks
+tidier and it produces a bogus baseline: every test file reports "No test suite found",
+which lands in the JSON as all-suites-failed with zero assertions, and the assertion
+diff then reads as a total regression. The size of the report is the tell — a valid run
+of this suite writes roughly 770 KB, a broken one about 65 KB. Run both halves in the
+same checkout.
 
 Diff the `fullName` values of failed assertions. A regression is a name failing in
 `fork.json` but not in `base.json`. Judge only by that: the totals wobble between runs
-because the suite contains live-provider and timing-sensitive tests. Around 90
-failures on both sides is normal on this checkout.
+because the suite contains live-provider and timing-sensitive tests. At `v0.5.59` the
+suite discovers 2084 tests across 216 files, and 88 assertions in 30 files fail on the
+upstream side; the fork's side is 86, because of the two it fixes.
 
 **Compare the file-level results too, not only assertion names.** A suite can fail with
 every assertion passing — a throw in `beforeAll` or `afterAll` produces no `fullName`,
@@ -1898,11 +1922,17 @@ Two things to control for:
   assertions in `unit/request-details-tab.test.js` flip. Both runs must see the same
   value or they are not comparable.
 - Vitest rewrites `tests/translator/__snapshots__/*.snap`, mostly LF → CRLF. Check with
-  `git diff --ignore-cr-at-eol` and revert the noise.
+  `git diff --ignore-cr-at-eol` and revert the noise. **It also re-creates
+  `golden-url-header.test.js.snap`, which upstream deleted in `2203cd8f` while keeping
+  the test.** That one arrives untracked rather than modified, so a `git checkout --` of
+  the snapshot directory misses it and it is one `git add .` from being committed back.
+  Delete it explicitly.
 
 The fork should pass two tests upstream fails, both in `unit/request-details-tab.test.js`
 and both because recording is on by default: `returns unique provider list without
 parsing data blobs` and `oversized field → stored truncated + reparseable (no circular)`.
+Confirmed still true at `v0.5.59`, and they are the *only* two — anything else appearing
+on that side of the diff is worth reading rather than welcoming.
 
 ### Post-merge check
 
