@@ -141,7 +141,11 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
   // lock still leaves lastError on the row until a real request succeeds, so lastError is
   // part of the condition rather than isCooldown alone. Declared here because isCooldown
   // is only initialised above this point.
-  const hasClearableLock = isCooldown || !!connection.lastError;
+  //
+  // Gated on isActive for the same reason CooldownTimer and the lastError text below are:
+  // a disabled connection hides both of them, so without this gate the orange Unlock
+  // button would be the only thing on the row referring to a lock the row does not show.
+  const hasClearableLock = (isCooldown || !!connection.lastError) && connection.isActive !== false;
 
   const getOneByOneVariant = () => {
     if (!oneByOneStatus) return "default";
