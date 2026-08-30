@@ -20,6 +20,9 @@ import Drawer from "@/shared/components/Drawer";
 import Pagination from "@/shared/components/Pagination";
 import { cn } from "@/shared/utils/cn";
 import { AI_PROVIDERS, getProviderByAlias } from "@/shared/constants/providers";
+// FORK(logs): shared with RequestDetailsTab, which renders the same rows — see the header
+// of that module for why these are not duplicated per tab.
+import { getCachedTokens, getCacheCreationTokens, getInputTokens } from "@/shared/utils/usageTokens";
 
 const OUTCOME_META = {
   ok: { label: "OK", variant: "success", icon: "check_circle" },
@@ -55,28 +58,9 @@ const PRE_CLASS = cn(
 );
 
 // ---------------------------------------------------------------------------
-// Formatting helpers. The token helpers mirror the Details tab so both views
-// report the same numbers for the same row.
+// Formatting helpers. The token arithmetic lives in @/shared/utils/usageTokens,
+// imported above, so this tab and the Details tab cannot disagree about a row.
 // ---------------------------------------------------------------------------
-
-function getCachedTokens(tokens) {
-  return tokens?.cached_tokens || tokens?.cache_read_input_tokens || 0;
-}
-
-function getCacheCreationTokens(tokens) {
-  return tokens?.cache_creation_input_tokens || 0;
-}
-
-function getInputTokens(tokens) {
-  const prompt = tokens?.prompt_tokens || tokens?.input_tokens || 0;
-  // Canonical storage keeps prompt cache-inclusive; the cache fallback covers
-  // rows that stored it cache-exclusive. Kept as a deliberate mirror of
-  // RequestDetailsTab.getInputTokens, not for this fork's own data: the two tabs
-  // read the same rows, so a different rule here would show two input counts for
-  // one request. Change it only alongside that copy.
-  const cache = getCachedTokens(tokens);
-  return prompt < cache ? cache : prompt;
-}
 
 function getProviderName(providerId, cache) {
   if (!providerId || !cache) return providerId;

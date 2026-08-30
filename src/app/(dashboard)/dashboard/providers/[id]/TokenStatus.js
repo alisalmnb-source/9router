@@ -73,13 +73,14 @@ export default function TokenStatus({ status }) {
   // A permanent failure is the only one that changes what you would do about it, so it is
   // the only one that gets words. Upstream classifies these; see isUnrecoverableRefreshError.
   //
-  // There is deliberately no branch for a non-permanent `attempt.code`, because that
-  // combination cannot occur: mergeRefreshedCredentials
+  // There is deliberately no branch for a non-permanent `attempt.classification`, because
+  // that combination cannot occur: mergeRefreshedCredentials
   // (open-sse/services/oauthCredentialManager.js) passes an `error` field through only
   // when isUnrecoverableRefreshError accepts it, and returns a freshly built object with
-  // no `error` key otherwise — so a non-null code has already been classified permanent
-  // by the same function that resolves this flag. A failed attempt with no code renders
-  // "refresh failed <when>" and no reason, which is the honest answer: upstream gave none.
+  // no `error` key otherwise — so a non-null classification has already been judged
+  // permanent by the same function that resolves this flag. A failed attempt with no
+  // classification renders "refresh failed <when>" and no reason, which is the honest
+  // answer: upstream gave none.
   const reasonText = historyIsError && attempt.permanent ? "re-authentication needed" : null;
 
   const untilText = nextRefreshDueAt ? formatTimeUntil(nextRefreshDueAt) : null;
@@ -100,7 +101,7 @@ export default function TokenStatus({ status }) {
       {reasonText && (
         <span
           className="max-w-full truncate text-[11px] text-red-500 sm:max-w-[220px]"
-          title={attempt.detail || reasonText}
+          title={attempt.providerCode || reasonText}
         >
           {reasonText}
         </span>
@@ -119,8 +120,8 @@ TokenStatus.propTypes = {
     attempt: PropTypes.shape({
       at: PropTypes.string,
       ok: PropTypes.bool,
-      code: PropTypes.string,
-      detail: PropTypes.string,
+      classification: PropTypes.string,
+      providerCode: PropTypes.string,
       permanent: PropTypes.bool,
     }),
   }),

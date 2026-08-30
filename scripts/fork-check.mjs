@@ -459,11 +459,11 @@ const CHECKS = [
       ])
     );
     const sum = Object.values(perFeature).reduce((a, b) => a + b, 0);
-    const ok = files.length === 26 && sum === 31;
+    const ok = files.length === 28 && sum === 33;
     const counts = Object.entries(perFeature).map(([f, n]) => `${f}=${n}`).join(" ");
     return {
       ok,
-      detail: `${files.length} tagged files (expect 26); ${counts}, sum=${sum} (expect 31 — one file carries two tags, two carry three)`,
+      detail: `${files.length} tagged files (expect 28); ${counts}, sum=${sum} (expect 33 — one file carries two tags, two carry three)`,
       lines: files,
     };
   }),
@@ -475,7 +475,7 @@ const MANUAL_ITEMS = [
   [4, "logs", "parseSessionName vs createLogSession: the name screen must stay a deny-list, and the stamp local-time"],
   [7, "logs", "truncateField must keep returning a new value instead of mutating its argument"],
   [17, "locks", "buildClearModelLocksUpdate must still enumerate modelLock_* by prefix, not from a fixed list"],
-  [23, "tokenstat", "buildRefreshAttempt must keep bounding code and detail through reduceDetail — GET /api/providers publishes both"],
+  [23, "tokenstat", "buildRefreshAttempt must keep bounding classification and providerCode through reduceDetail — GET /api/providers publishes both"],
 ];
 
 function main() {

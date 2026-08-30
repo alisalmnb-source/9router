@@ -85,22 +85,29 @@ function reduceDetail(value) {
  * failure shapes exist in `open-sse/services/tokenRefresh/providers.js` today:
  * `null` (by far the common one — no reason available at all),
  * `{ error: "unrecoverable_refresh_error", code }` from the classified permanent branch,
- * and `{ error: "invalid_grant" }` from the dedup wrapper's catch. So `code` holds
- * upstream's classification and `detail` the provider's own code when there is one.
- * Whether that classification means "re-authenticate" is NOT stored — see
- * `resolveTokenRefreshStatus`.
+ * and `{ error: "invalid_grant" }` from the dedup wrapper's catch.
+ *
+ * **The two stored names are not upstream's, and the mapping is crossed on purpose.**
+ * Upstream puts its own classification in `error` and the provider's raw code in `code`,
+ * so storing them under those names would give this record a `code` meaning one thing and
+ * upstream's `code` meaning another. `classification` and `providerCode` say which is
+ * which, and the two locals below exist so the crossing is legible at the assignment
+ * rather than only in this paragraph. Whether the classification means "re-authenticate"
+ * is NOT stored — see `resolveTokenRefreshStatus`.
  *
  * @param {boolean} ok
  * @param {object|null} refreshResult  what `refreshProviderCredentials` returned
  * @param {number} [nowMs]
- * @returns {{ at: string, ok: boolean, code: string|null, detail: string|null }}
+ * @returns {{ at: string, ok: boolean, classification: string|null, providerCode: string|null }}
  */
 export function buildRefreshAttempt(ok, refreshResult, nowMs = Date.now()) {
+  const classification = refreshResult?.error;
+  const providerCode = refreshResult?.code;
   return {
     at: new Date(nowMs).toISOString(),
     ok: !!ok,
-    code: ok ? null : reduceDetail(refreshResult?.error),
-    detail: ok ? null : reduceDetail(refreshResult?.code),
+    classification: ok ? null : reduceDetail(classification),
+    providerCode: ok ? null : reduceDetail(providerCode),
   };
 }
 
@@ -211,7 +218,7 @@ function resolveNextRefreshDueAt(connection) {
  * construction and no caller has to test it.
  *
  * @param {object} connection
- * @returns {{ at: string, ok: boolean, code: string|null, detail: string|null }|null}
+ * @returns {{ at: string, ok: boolean, classification: string|null, providerCode: string|null }|null}
  */
 function readRefreshAttempt(connection) {
   const stored = connection?.[REFRESH_ATTEMPT_FIELD];
@@ -220,8 +227,8 @@ function readRefreshAttempt(connection) {
   return {
     at: stored.at,
     ok: !!stored.ok,
-    code: reduceDetail(stored.code),
-    detail: reduceDetail(stored.detail),
+    classification: reduceDetail(stored.classification),
+    providerCode: reduceDetail(stored.providerCode),
   };
 }
 
@@ -310,7 +317,7 @@ export function resolveTokenRefreshStatus(connection) {
     scheduled: nextRefreshDueAt !== null,
     nextRefreshDueAt,
     attempt: attempt
-      ? { ...attempt, permanent: isUnrecoverableRefreshError({ error: attempt.code }) }
+      ? { ...attempt, permanent: isUnrecoverableRefreshError({ error: attempt.classification }) }
       : null,
     lastRefreshAt: lastRefreshMs === null ? null : new Date(lastRefreshMs).toISOString(),
   };
