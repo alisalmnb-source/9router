@@ -13,43 +13,48 @@ into it.
 
 ### Merge log
 
-- `v0.5.59` → `5920eec4`, 2026-08-29. No counts moved — all 24 automated items passed
-  unchanged, and neither `open-sse/config/errorConfig.js` nor
-  `src/sse/services/backgroundTokenRefresh.js` appeared in upstream's diff at all.
-  `src/sse/services/auth.js` conflicted, in `markAccountUnavailable`'s `resetsAtMs`
-  branch; resolved by keeping upstream's antigravity case with the fork's resolver as
-  the cap on the other side. Three claims corrected instead of counts: step 2 of
-  [How outcome is decided](#how-outcome-is-decided), because upstream now calls
-  `onStreamComplete` from `transform()` as well as from `flush()`; a new `locks`
-  known limitation, because antigravity quota blocks now bypass
-  `markAccountUnavailable` altogether; and
-  [The timeout](#the-timeout-is-the-only-new-behaviour) with the `conntest` limitation
-  and the `testUtils.js` row that repeat it, because `fetchWithConnectionProxy` now
-  defaults `options.signal` to `AbortSignal.timeout(15000)` — so "nothing on the server
-  side races a deadline" was false, and `TEST_TIMEOUT_MS` acquired a lower bound that no
-  checklist item can see. That one was missed in the merge commit and found afterwards,
-  by reading upstream's diff against
-  [What upstream can break](#files-the-fork-depends-on-but-never-edits) — step 1, run
-  late. The test comparison then found the one real
-  regression of this merge, and it predated it: the `locks` settings read failed open
-  only for an *asynchronous* throw, so the two cases in
-  `tests/unit/github-monthly-usage-lock.test.js` — whose `@/lib/localDb` mock omits
-  `getSettings` — took `markAccountUnavailable` down. Fixed by wrapping the call in
-  `try`/`catch`; that test file is now recorded in
-  [What upstream can break](#files-the-fork-depends-on-but-never-edits). The post-merge
-  check then corrected step 10, which told you to test `attempt.at` for *equality* with
-  `lastRefreshAt` — two separate `Date.now()` calls that differ by 1 to 2 ms on 40% of a
-  healthy install. Steps 1 to 5 and 9 to 11 all pass; 6, 7 and 8 need a deliberate
-  provider failure or a browser and were not run. A review of the whole fork diff before
-  committing then found the `logs` bug that predates every merge:
-  `handleForcedSSEToJson` never received a `reqLogger`, so on any `forceStream` provider
-  answering a non-streaming request the response was absent from disk and a successful
-  row was badged `Incomplete`. Fixed by passing it and writing both stages —
-  [The third response path](#the-third-response-path). Found by reading, not by a check;
-  nothing in the checklist can see a missing argument, and the numbers it does count all
-  passed. The same review corrected `readConfiguredMs`'s docblock in `lockPolicy.js`,
-  which claimed the Settings card writes numeric strings when `secondsToMs` makes it
-  write numbers.
+- `v0.5.59` → `5920eec4`, 2026-08-29. **No counts moved**, 24/24. `errorConfig.js` and
+  `backgroundTokenRefresh.js` — the two most consequential upstream files — were absent
+  from upstream's diff entirely. **Conflicted:** `src/sse/services/auth.js`, in
+  `markAccountUnavailable`'s `resetsAtMs` branch; resolved by keeping upstream's
+  antigravity case with the fork's resolver as the cap on the other side, commented in
+  place. **Claims corrected rather than counts**, each rewritten where it lives: step 2 of
+  [How outcome is decided](#how-outcome-is-decided) (`onStreamComplete` now also fires from
+  `transform()`), a new third bullet in
+  [Known limitations — locks](#known-limitations--locks) (antigravity quota now bypasses
+  `markAccountUnavailable`), [The timeout](#the-timeout-is-the-only-new-behaviour) plus the
+  two rows repeating it (`fetchWithConnectionProxy` gained a 15 s per-fetch bound, giving
+  `TEST_TIMEOUT_MS` a lower bound), and post-merge step 10 (it said *equality* where the
+  comparison must be strict). Post-merge steps 1 to 5 and 9 to 11 pass; 6 to 8 were run
+  later, in the review below.
+
+  **Four defects found, none by a checklist item — that is the lesson of this merge.**
+  Recorded here because each one names a blind spot that is now covered elsewhere:
+
+  | Found by | Defect | Now covered by |
+  | --- | --- | --- |
+  | reading upstream's diff against [What upstream can break](#files-the-fork-depends-on-but-never-edits), too late | the 15 s bound above | doing step 1 *before* merging |
+  | the test comparison | the `locks` settings read failed open only on an *async* throw, taking down two cases in `github-monthly-usage-lock.test.js` | its row in [What upstream can break](#files-the-fork-depends-on-but-never-edits) |
+  | reading the whole fork diff | `handleForcedSSEToJson` never received a `reqLogger`, so every successful forced-SSE-to-JSON row was badged `Incomplete` | [The third response path](#the-third-response-path) |
+  | reviewing the two features that share a row | `handleTestConnection` never refetched, so the badge updated while four row fields it writes stayed stale | a bullet in post-merge step 8 |
+
+  The same review deleted seven pieces of dead or defensive code, each of which now says in
+  place why it is absent: `/api/locks/reset`'s unread `cleared` count (and
+  `MODEL_LOCK_PREFIX` with it), `CollapsibleSection`'s unpassed `badge` and `defaultOpen`,
+  the `!== undefined` half of `LogsTab`'s `stream` test, `TokenStatus`'s unreachable
+  non-permanent `attempt.code` branch, `readConfiguredMs`'s numeric-string arm, and
+  `readRefreshAttempt`'s shape screen for "an older build" of a field this diff introduces.
+  Two robustness fixes with no behavioural change: `fs.openSync` moved inside the `try` in
+  both `requestLogsFs.js` readers, and `hasClearableLock` gained the `isActive` gate its
+  neighbours had. Verified in a browser, not by reading: the Test click issues a fresh
+  `GET /api/providers` and `GET /api/token-status`, and on the `codex` list none of the 146
+  disabled rows carries an Unlock button while all 120 active errored ones do.
+
+  A pass over this document then corrected the `npx eslint .` figure and closed one gap —
+  see [Verifying](#verifying) for why that total is not reproducible, and
+  [Known limitations — tokenstat](#known-limitations--tokenstat) for the sweep's per-refresh
+  write. It also renamed the four `### Known limitations` headings per feature, retiring the
+  rule against linking to them.
 - Fork point `699edac3`, tag `v0.5.55`. No merges before this.
 
 **Merging right now?** In order:
@@ -92,18 +97,22 @@ are kept because they are the readable statement of what is being asserted, and 
   [The `logDir` bridge](#the-logdir-bridge--most-likely-to-conflict) is the part a merge
   lands on. Also [The third response path](#the-third-response-path),
   [Header masking](#header-masking), [Access](#access),
-  [Tab registration](#tab-registration), [Environment](#environment) and
-  [How outcome is decided](#how-outcome-is-decided).
+  [Tab registration](#tab-registration), [Environment](#environment),
+  [How outcome is decided](#how-outcome-is-decided) and
+  [Known limitations](#known-limitations--logs).
 - [Feature: locks](#feature-locks) — configurable cooldowns and a per connection release
   button. [The remapping](#the-remapping--most-likely-to-conflict) is the part a merge
-  lands on. Also [The reset route](#the-reset-route).
+  lands on. Also [The reset route](#the-reset-route) and
+  [Known limitations](#known-limitations--locks).
 - [Feature: conntest](#feature-conntest) — Test on each Connections row.
-  [The timeout](#the-timeout-is-the-only-new-behaviour) is the only new behaviour.
+  [The timeout](#the-timeout-is-the-only-new-behaviour) is the only new behaviour. Also
+  [Known limitations](#known-limitations--conntest).
 - [Feature: tokenstat](#feature-tokenstat) — token refresh status on each Connections row.
   [The two branches](#the-two-branches--most-likely-to-conflict) are the part a merge
   lands on. Also [The record field](#the-record-field),
-  [Eligibility](#eligibility-and-the-three-things-a-row-can-say) and
-  [The read route](#the-read-route).
+  [Eligibility](#eligibility-and-the-three-things-a-row-can-say),
+  [The read route](#the-read-route) and
+  [Known limitations](#known-limitations--tokenstat).
 - [Upstream merge checklist](#upstream-merge-checklist) — one numbered item per
   assertion, each with its grep, its expected count and its repair.
 - [Verifying](#verifying) — lint, build and the test comparison, none of which the
@@ -111,14 +120,21 @@ are kept because they are the readable statement of what is being asserted, and 
 - [Post-merge check](#post-merge-check) — the steps that need a running instance,
   because nothing above proves a feature still works end to end.
 
-**Five headings repeat across the feature sections and are deliberately absent here** —
-`Why it exists`, `Design`, `Settings`, `Deliberately untouched` and `Known limitations`. A
-repeated heading gets a positional anchor id (`#known-limitations-2`) that shifts silently
-when a feature is added or reordered, so linking them would put rotting anchors in the one
-place a reader trusts. Jump to the feature and read down: within a section they always
-appear in the order listed above, with the conflict-prone section linked here among them.
-Not every feature carries all five — `conntest` has no `Settings` and no
-`Deliberately untouched`.
+**Four headings repeat across the feature sections and are deliberately absent here** —
+`Why it exists`, `Design`, `Settings` and `Deliberately untouched`. A repeated heading gets
+a positional anchor id (`#design-2`) that shifts silently when a feature is added or
+reordered, so linking them would put rotting anchors in the one place a reader trusts. Jump
+to the feature and read down: within a section they always appear in that order, with the
+conflict-prone section and `Known limitations` linked here among them. Not every feature
+carries all four — `conntest` has no `Settings` and no `Deliberately untouched`.
+
+**`Known limitations` used to be the fifth, and was renamed per feature instead** —
+`Known limitations — logs` and so on. It is the sub-section the rest of this document
+cross-references most, and three places had to say "read it below" rather than link to it.
+Suffixing the feature name costs one word and buys a stable anchor. **Do the same for a
+fifth feature's, and do not reintroduce a bare `### Known limitations`** — the anchors are
+positional, so adding one silently retargets every link above to whichever section now comes
+second.
 
 This list carries no counts on purpose; item 25 already owns every number that goes stale.
 
@@ -198,7 +214,7 @@ line 49, `logs/*`, is what keeps raw dumps out of version control — see the en
 ## Fork inventory
 
 Every file the fork touches, across all features. Fifteen modified, thirteen added,
-**+415 −32** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
+**+435 −32** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
 over the fifteen rows of the Modified table.
 
 ```
@@ -261,8 +277,8 @@ harmless.
 | `src/app/(dashboard)/dashboard/usage/page.js` | logs | +7 −1 | Registers the tab under the key `inspector`. |
 | `src/sse/services/auth.js` | locks | +47 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. Since `v0.5.59` the `resetsAtMs` branch also carries upstream's antigravity carve-out, which skips the cap rather than the resolver — the conflict landed exactly here, so the resolution is commented in place. The settings read is wrapped in `try`/`catch` rather than `.catch()`, which two upstream tests depend on — see `tests/unit/github-monthly-usage-lock.test.js` in "What upstream can break". |
 | `src/app/(dashboard)/dashboard/profile/page.js` | locks | +6 | One import, one render line for `LockDurationsCard`. |
-| `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest, tokenstat | +68 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. Then one `tokenStatus` prop and one `<TokenStatus>` line in the info column. |
-| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +59 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
+| `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest, tokenstat | +72 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. Then one `tokenStatus` prop and one `<TokenStatus>` line in the info column. |
+| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +75 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. Both handlers end in `fetchConnections()`, because both routes write row fields beyond the one the button displays. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
 | `src/sse/services/tokenRefresh.js` | tokenstat | +60 | `recordRefreshAttempt`, called from both branches of `checkAndRefreshToken`. The whole runtime footprint of the feature. Upstream's `if` condition line is untouched. |
 
 ## Rules that outlive a feature
@@ -389,7 +405,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | Upstream file | Threatens |
 | --- | --- |
 | `open-sse/config/errorConfig.js` | Checklists 11, 12 and 15. **The single most consequential file for the `locks` feature, and the fork does not touch it.** `lockPolicy.js` imports `BACKOFF_CONFIG`, `COOLDOWN_MS`, `TRANSIENT_COOLDOWN_MS` and `MAX_RATE_LIMIT_COOLDOWN_MS` and uses their values as the *keys* of its remapping, so upstream retuning a number is handled automatically while upstream removing or renaming an export is a build failure. Adding a rule with a new distinct duration is the quiet case: that rule keeps upstream's value and no configured field reaches it. **`COOLDOWN_MS` is the weak link:** upstream marks it backward compat, nothing in `open-sse` actually reads it, and the fork is its only real consumer — so it is the export most likely to disappear. Checklist 12 has the consumer list and the repair. |
-| `open-sse/services/accountFallback.js` | Checklists 13, 14 and 17. Owns `getQuotaCooldown`, whose formula `resolveBackoffCooldownMs` mirrors; `checkFallbackError`, whose `newBackoffLevel` field is the only thing distinguishing a ladder duration from a fixed one; and `buildClearModelLocksUpdate` plus `MODEL_LOCK_PREFIX`, which the reset route uses so no lock-key naming is duplicated in fork code. |
+| `open-sse/services/accountFallback.js` | Checklists 13, 14 and 17. Owns `getQuotaCooldown`, whose formula `resolveBackoffCooldownMs` mirrors; `checkFallbackError`, whose `newBackoffLevel` field is the only thing distinguishing a ladder duration from a fixed one; and `buildClearModelLocksUpdate`, which the reset route uses so no lock-key naming is duplicated in fork code. |
 | `src/app/api/providers/[id]/test/route.js` and `test/testUtils.js` | Checklist 18 — the row button reads `valid` and `error` from this route's JSON. The fork adds no test logic of its own, so every provider quirk in `testUtils.js` shows through unchanged. Worth knowing which: `claude`, `kiro`, `kimi`, `kimi-coding` are `checkExpiry` and `cursor`, `codebuddy-cn` are `tokenExists`, so for those six a green result means "a token exists and has not expired" and nothing reaches the provider. **Also `fetchWithConnectionProxy`'s `AbortSignal.timeout(15000)`, added in `v0.5.59`:** `TEST_TIMEOUT_MS` has to stay above it, so upstream retuning that number upward past 30000 silently makes this fork's deadline the one that fires first. No checklist item covers it — the counts cannot see a number, and both values stay plausible. Read [The timeout](#the-timeout-is-the-only-new-behaviour). **`tokenstat` depends on this file too, through `refreshOAuthToken`:** its `codex`, `grok-cli` and `xai` branches delegate to `refreshProviderCredentials` and so stamp `lastRefreshAt`, which is what lets `isSupersededByLastRefresh` retire a stale record after a Test. Every other branch hand-rolls the token POST and leaves no timestamp, so the recovery does not reach those providers. Upstream moving a branch either way silently widens or narrows that coverage, and nothing counts it. |
 | `src/app/(dashboard)/dashboard/providers/components/ConnectionsCard.js` | **A divergent copy, deliberately left alone.** It carries its own inner `ConnectionRow` and `CooldownTimer`, duplicated by upstream, and is reached only from `dashboard/media-providers/[kind]/[id]`. Neither the Test nor the Unlock button was added to it, so media-provider connections have neither. Adding them would mean maintaining the same two buttons in two components that already drift. If upstream ever merges the two copies, the buttons come along for free — check that they did. |
 | `open-sse/translator/formats.js` | Checklist 4 — a format id containing `_` splits every directory name wrongly. Thirteen ids today and none contains `_`: ten are single lowercase words, three are hyphenated (`openai-responses`, `openai-response`, `gemini-cli`). Read the **values**, not the keys — the keys do use underscores (`OPENAI_RESPONSES`) and never reach a directory name. |
@@ -575,10 +591,9 @@ then hands `logProviderResponse` the parsed object. Following it keeps both
 JSON-returning paths writing the same pair of `.json` stages, so the `.json`/`.txt`
 split still means "how the client was answered". It also keeps the change additive:
 `convertResponsesStreamToJson(providerResponse.body)` consumes the stream, so capturing
-frames would have meant buffering and replaying it around an upstream line. The cost is
-in this feature's own "Known limitations" below — frame-level detail stays the streaming
-path's alone. (Named rather than linked: four sections carry that heading, so its
-generated id is positional and would retarget the moment a feature is reordered.)
+frames would have meant buffering and replaying it around an upstream line. The cost is in
+[Known limitations — logs](#known-limitations--logs): frame-level detail stays the
+streaming path's alone.
 
 **What a merge can do to this.** Nothing counts it: `reqLogger` is a plain parameter, and
 a resolution that drops it from either the signature or the call site leaves no error
@@ -735,27 +750,20 @@ this order:
    or completion count, means the stream finished.
 
    **What "reached its end" means is upstream's to define, and it changed in `v0.5.59`.**
-   `createSSEStream` in `open-sse/utils/stream.js` now collects the usage-and-logging
-   tail into a `finalizeStream()` guarded by a `finalized` flag, and calls it from three
-   places: the flush, the flush's own `catch`, and — this is the new one — `transform()`,
-   as soon as an OpenAI Responses terminal event is seen. So the callback is no longer
-   flush-only. Two things follow, and only the first is obvious:
+   `createSSEStream` in `open-sse/utils/stream.js` now collects the usage-and-logging tail
+   into a `finalizeStream()` guarded by a `finalized` flag, called from three places rather
+   than only the flush: the flush, the flush's own `catch`, and — the new one — `transform()`,
+   as soon as an OpenAI Responses terminal event is seen. That third site *fixed* a class of
+   false `incomplete` results: a Responses client such as codex CLI closes on
+   `response.completed` instead of `[DONE]`, cancelling the reader so flush never ran, and the
+   row kept its placeholder. **The `finalized` flag is what keeps the signal honest** — lose
+   it and the record is written twice, the second time from a later path, rewriting the row's
+   `logDir` and token counts behind the reader.
 
-   - The `finalized` flag is what keeps this signal honest. It makes `onStreamComplete`
-     fire exactly once no matter how many of the three paths are taken, so the fork's
-     upsert still runs once per request. **Lose that guard and the record is written
-     twice**, the second time from a later path with the same values — harmless for this
-     step, but the row's `logDir` and token counts get rewritten behind the reader.
-   - The new `transform()` call site *fixed* a class of false `incomplete` results
-     rather than creating one. A Responses client such as codex CLI closes on
-     `response.completed` instead of `[DONE]`, which cancels the reader so flush never
-     ran; the row kept its placeholder and this step called a completed response
-     unfinished. It now answers correctly.
-
-   The direction that would break the step is the reverse: `finalizeStream()` called
-   somewhere a terminal event has *not* been seen. Then a stream that died mid-flight
-   gets real values written over its placeholder and reads as `ok` here, with steps 3
-   and 4 never consulted.
+   **The direction that would break this step is the reverse:** `finalizeStream()` called
+   somewhere a terminal event has *not* been seen. Then a stream that died mid-flight gets
+   real values written over its placeholder and reads as `ok` here, with steps 3 and 4 never
+   consulted.
 
    **This step is gated on `detail.response?.type === "streaming"` and answers for
    streams only.** `deriveStreamingOutcomeFromRecord` returns `null` for anything else, so
@@ -835,7 +843,7 @@ mechanism to reach for here.
   `resolveOutcome` rather than patched.
 - No table, column, index or `SCHEMA_VERSION` change anywhere.
 
-### Known limitations
+### Known limitations — logs
 
 - **One row per attempt, not per client request.** `saveRequestDetail` runs inside
   `chatCore`, which the account loop in `src/sse/handlers/chat.js` calls once per
@@ -879,53 +887,45 @@ mechanism to reach for here.
 - **Outcome filtering narrows the current page only.** It is derived per row, partly
   from the filesystem, so it cannot be a SQL predicate. The UI says so under the
   control.
-- **Stage count varies per row**, from one to seven files, because a file exists only
-  if that step ran: `3_req_openai.json` when the request goes through the OpenAI pivot
-  (`translator/index.js`), `5_res_provider.json` and `7_res_client.json` when the client
-  is answered with JSON against `5_res_provider.txt` and `7_res_client.txt` when it is
-  streamed, `6_res_openai.txt` for translated streams, `6_error.json` on failure. The
-  panel lists what is on disk rather than padding out absent stages.
+- **Stage count varies per row, one to seven**, because a file exists only if that step
+  ran. The panel lists what is on disk rather than padding out absent stages.
 
-  **Seven is the ceiling and one is the floor**, and both ends are easy to get wrong.
-  `STAGE_FILES` in `requestLogsFs.js` lists ten possible names, and no row gets close to
-  ten, for three separate reasons:
+  | Stage file | Written when |
+  | --- | --- |
+  | `1_req_client.json` | only `if (clientRawRequest)` |
+  | `2_req_source.json` | unconditionally — the floor |
+  | `3_req_openai.json` | the OpenAI pivot path only, from `translator/index.js` |
+  | `4_req_target.json` | *after* `executor.execute()` returns, inside the same `try` |
+  | `5_res_provider.json` / `.txt` | `.json` when the client is answered with JSON, `.txt` when streamed |
+  | `6_res_openai.txt` | translated streams, from `open-sse/utils/stream.js` |
+  | `6_error.json` | `chatCore.js`'s `if (!providerResponse.ok)` block |
+  | `7_res_client.json` / `.txt` | the same `.json`/`.txt` split as stage 5 |
 
-  - The `.json` and `.txt` variants of stages 5 and 7 are mutually exclusive, and **the
-    split is by how the client was answered, not by how the provider replied.** Two of
-    the three response handlers return JSON and write the pair of `.json` files —
-    `handleNonStreamingResponse` and `handleForcedSSEToJson`, the second of which read
-    SSE frames to get there. Only `handleStreamingResponse` appends the pair of `.txt`
-    ones.
-  - **`6_res_openai.txt` and `6_error.json` cannot coexist**, which is what caps the total
-    at seven rather than eight. `reqLogger.logError` has exactly one call site in the whole
-    engine: inside `chatCore.js`'s `if (!providerResponse.ok)` block, which `return`s
-    immediately after it. `appendOpenAIChunk` is only ever called from
-    `open-sse/utils/stream.js`, which runs only once that return has been passed. So a
-    translated stream that dies mid-flight leaves `6_res_openai.txt` and **no**
-    `6_error.json` — nothing on the streaming path writes one.
-  - Three of the four request copies are conditional. Stage 1 is written only
-    `if (clientRawRequest)`; stage 3 only on the pivot path, from `translator/index.js`;
-    stage 4 only *after* `executor.execute()` returns, from inside the same `try`.
+  **`STAGE_FILES` lists ten names and no row reaches ten**, for two reasons beyond the
+  conditionals above. The stage 5 and 7 variants are mutually exclusive, and **the split is
+  by how the client was answered, not how the provider replied** — `handleNonStreamingResponse`
+  and `handleForcedSSEToJson` both write `.json`, the second after reading SSE frames to get
+  there, and only `handleStreamingResponse` appends `.txt`. And **`6_res_openai.txt` and
+  `6_error.json` cannot coexist**, which caps the total at seven rather than eight:
+  `reqLogger.logError` has exactly one call site, inside that `!ok` block, which `return`s
+  immediately, while `appendOpenAIChunk` runs only once that return has been passed. So a
+  translated stream dying mid-flight leaves `6_res_openai.txt` and **no** `6_error.json`.
 
-  That last point is where the floor comes from. The `catch` around `executor.execute()`
-  saves a `requestDetails` row without ever reaching stage 4 and without calling
-  `logError`, so such a row can hold as little as `2_req_source.json` alone — the one
-  unconditional stage.
+  The floor follows from stage 4 being conditional: the `catch` around `executor.execute()`
+  saves a row without reaching it and without calling `logError`, so such a row can hold
+  `2_req_source.json` alone.
 
-  **Five to seven is the band for a request the provider answered *successfully*, not for
-  one that merely reached it.** A non-2xx answer writes four in the common case —
-  `1_req_client.json`, `2_req_source.json`, `4_req_target.json`, `6_error.json` — or five
-  on the pivot path,
-  because `chatCore.js`'s `if (!providerResponse.ok)` block calls `logError` and `return`s
-  without ever calling `logProviderResponse`, so stages 5 and 7 never happen. **Read stage
-  4 instead of the total**: it is written only after `executor.execute()` returns, so its
-  presence means the provider was reached whatever the count. Judging by the count reads
-  the most common row in the tab — a failed upstream call — as "never left the router",
-  which is the opposite of what happened.
+  **Five to seven is the band for a request the provider answered *successfully*, not one
+  that merely reached it.** A non-2xx answer writes four — stages 1, 2, 4 and `6_error.json`
+  — or five on the pivot path, because that `!ok` block returns without ever calling
+  `logProviderResponse`. **So read stage 4 rather than the total:** its presence means the
+  provider was reached whatever the count, and judging by the count reads the most common
+  row in the tab, a failed upstream call, as "never left the router".
 
-  Checked by reading, not counting: `git grep -n "reqLogger.logError\|appendOpenAIChunk" --
-  open-sse` returns the two write sites and their call sites, and the point is whether any
-  call site of the second can be reached after the first has run.
+  Checked by reading rather than counting — `git grep -n
+  "reqLogger.logError\|appendOpenAIChunk" -- open-sse` returns both write sites and their
+  call sites, and the question is whether any call site of the second is reachable after the
+  first has run.
 - **`logs/` follows `process.cwd()`, not `DATA_DIR`** — matching the upstream writer.
   A packaged CLI with a different working directory reads a different tree. Checklist 10
   guards the pairing.
@@ -1002,7 +1002,8 @@ reader of `MAX_RATE_LIMIT_COOLDOWN_MS`, and it performs the single
 antigravity quota block never reaches this function at all: `src/sse/handlers/chat.js`
 hard-codes `shouldFallback` and skips the call when `handleAntigravityQuotaError` comes back
 with a `resetAt`, so no configured duration is consulted and no `modelLock_*` is written.
-That is the third bullet of this feature's Known limitations below, and it is the one gap in
+That is the third bullet of [Known limitations — locks](#known-limitations--locks), and it
+is the one gap in
 the "one convergence point" premise — everything else in this section still rests on it.
 
 Its three branches are treated differently, on purpose:
@@ -1094,12 +1095,12 @@ applies the same reset block as `clearAccountError`: `testStatus`, `lastError`,
 showing `unavailable` and its error text until a real request succeeded, and would leave
 `backoffLevel` in place so the next failure resumed the ladder mid-climb.
 
-The response is `{ ok, cleared }`. **`cleared` counts every `modelLock_*` key that held a
-value, expired ones included**, not the number of locks that were still active — expired
-keys accumulate on a record until something clears them, and this route does clear them, so
-reporting them is correct. It does mean `cleared: 3` can be one live cooldown and two stale
-keys, which is why post-merge step 7 checks the five reset fields rather than trusting the
-count. Nothing in the app reads `cleared`; the merge check is its only consumer.
+The response is `{ ok: true }` and deliberately carries no count. The caller re-reads the
+connection list to redraw the row, so a number would have had no reader, and the only count
+worth reporting — how many locks were actually *released* — is not what a scan of the record
+measures: expired `modelLock_*` keys sit on it until something clears them and this route
+clears them too, so any such figure mixes live cooldowns with stale keys. Post-merge step 7
+checks the five reset fields on the record instead, which is exact.
 
 The `/api/locks` prefix is a guard requirement, not a preference — see the fork-wide rule.
 `/api/locks` is in `LOCAL_ONLY_PATHS`, and deny-by-default does not cover it while
@@ -1134,7 +1135,7 @@ more load-bearing than it is.
   `ModelAvailabilityBadge` UI are left as upstream wrote them. That is where per-model
   release lives; this feature's button is per connection.
 
-### Known limitations
+### Known limitations — locks
 
 - **A saved value does not shorten a lock already written.** The duration is baked into
   the `modelLock_*` timestamp at write time, so a new value applies to the next failure and
@@ -1161,8 +1162,9 @@ more load-bearing than it is.
   - No `modelLock_*` is written, so the Unlock button has nothing to clear. The block is a
     module-level `Map` in `src/sse/services/antigravityQuota.js`, read by `auth.js`'s
     pre-filter, and it ends only when the upstream `resetAt` passes or the process
-    restarts. **The button still renders** if `connection.lastError` or `isCooldown` says
-    so, and clicking it will report success while the account stays blocked.
+    restarts. **The button still renders** if `connection.lastError` or `isCooldown` says so
+    on an active connection, and clicking it will report success while the account stays
+    blocked.
 
   The fall-through is the case that still works: when the quota call fails, or the model
   is not actually exhausted, `handleAntigravityQuotaError` returns `null` and the normal
@@ -1215,7 +1217,26 @@ no second display path — `getOneByOneVariant` and `getOneByOneLabel` in `Conne
 are upstream's and were not modified.
 
 The button is disabled while a one-by-one run is in progress, since both write the same
-state.
+state. **The guard is one-directional and that is a known gap**, not a claim: a per-row test
+does not set `oneByOneRunning`, so starting a bulk run while one is in flight lets the single
+result land in the loop's map after `setOneByOneResults` has reset it. Cosmetic and
+self-correcting once the loop reaches that row — listed under
+[Known limitations — conntest](#known-limitations--conntest).
+
+**`handleTestConnection` ends with `await fetchConnections()`, and the badge is not what
+needs it.** The route writes four things the row already displays from `connections`:
+`testUtils.js` sets `testStatus`, `lastError` and `lastErrorAt`, and the
+`refreshProviderCredentials` call inside it stamps `lastRefreshAt`. Without the refetch the
+status badge, the red `lastError` text, the Unlock button's visibility and the whole
+`tokenstat` line all keep pre-test state. The token line is the one that misleads rather than
+merely lagging: a connection with a failed refresh shows a green `success` badge beside a red
+"re-authentication needed" that the test just invalidated — the staleness
+`isSupersededByLastRefresh` resolves server side and nothing was asking the server about. See
+[The two branches](#the-two-branches--most-likely-to-conflict) for that resolution.
+
+Upstream's one-by-one loop does not refetch, and that is upstream's to keep rather than a
+precedent to copy: the fork's other new button in this row, Unlock, refetches for the same
+reason, and the `tokenstat` correctness argument assumes a refetch happens.
 
 **`handleRunOneByOneTest` is deliberately not refactored.** Routing that loop through the
 same helper would remove upstream's duplicate `fetch`, and it was left in place anyway:
@@ -1242,7 +1263,7 @@ the values. A stalled provider trips upstream's per-fetch bound first, which ret
 those real errors with `No response within Ns` — no error anywhere, just a less useful
 message on exactly the failures the feature exists to diagnose.
 
-### Known limitations
+### Known limitations — conntest
 
 - **The timeout is client-side only.** Aborting the fetch does not stop the server-side
   probe. What it bounds is the spinner, not the work. Since `v0.5.59` the work is bounded
@@ -1257,7 +1278,13 @@ message on exactly the failures the feature exists to diagnose.
   proxy first and short-circuits without contacting the provider if it is dead.
 - **`lastError` being set does not imply a failure.** A soft success, such as Grok CLI's
   402 spending limit, keeps `testStatus: "active"` and puts the warning text in
-  `lastError`.
+  `lastError`. The row does show the new value, because the handler refetches.
+- **A bulk run started during a row test can show one stale badge.** The guard runs one way
+  only: `testBusy` disables every row button during a one-by-one run, but
+  `handleRunOneByOneTest` gates on `oneByOneRunning`, which a row test does not set. The
+  single result then lands after `setOneByOneResults` has reset the map, so that row's badge
+  describes a different test from the summary counters until the loop reaches it. Cosmetic,
+  and not worth a second piece of shared state to close.
 - **No button on media-provider connections**, same divergent-copy reason as the Unlock
   button.
 
@@ -1336,8 +1363,8 @@ Neither uncovered path is invisible: a 401 refresh failure fails the request, wh
 `markAccountUnavailable` and puts red text on the row, and the Test button writes its own
 result to the badge. What they do not do is get labelled as a refresh outcome. Closing
 either would mean editing `open-sse/`, or editing all six modality handlers rather than the
-one place they meet — see this feature's Known limitations below. (No anchor link: four
-sections now carry that heading, so the generated ids are positional and would rot.)
+one place they meet — see
+[Known limitations — tokenstat](#known-limitations--tokenstat).
 
 **So the read side cannot treat the stored record as automatically current, and
 `isSupersededByLastRefresh` is what stops it from doing so.** An uncovered path that leaves
@@ -1432,6 +1459,10 @@ that touches it, so a failing one under load writes this field repeatedly. Upstr
 makes a network call per request in that situation, which dominates a local write, and a
 throttle would mean module state and a second opinion about time.
 
+**That argument covers the request path and not the sweep**, which is the one place the write
+is not dominated by anything — see
+[Known limitations — tokenstat](#known-limitations--tokenstat).
+
 ### Eligibility, and the three things a row can say
 
 `isRefreshEligible` mirrors three of the sweep's four conditions: `isActive`, `authType`
@@ -1522,7 +1553,7 @@ safety bound rather than a preference. So `settingsRepo.js` and
 - **`src/dashboardGuard.js`.** The only fork feature that adds a route and does not touch
   it. Reasoning under [The read route](#the-read-route).
 
-### Known limitations
+### Known limitations — tokenstat
 
 - **Two of the four refresh paths are not observed** — the reactive 401 retry and the Test
   button. Both leave their own traces (`markAccountUnavailable`'s red text, the test badge)
@@ -1538,7 +1569,14 @@ safety bound rather than a preference. So `settingsRepo.js` and
   problem and never hide one. Closing the rest means a signal in `open-sse/` or in
   `testUtils.js`, and both are outside what this feature edits.
 - **Most failures have no reason.** See the shape table above. `code` and `detail` are
-  populated for the classified permanent cases and empty for everything else.
+  populated for the classified permanent cases and empty for everything else. **That is why
+  `TokenStatus.js` has no branch for a non-permanent `code`**, and the absence is structural
+  rather than an omission: `mergeRefreshedCredentials` passes an `error` field through only
+  when `isUnrecoverableRefreshError` accepts it, so a non-null `code` has already been
+  classified permanent by the same function that resolves the flag. A failed attempt with no
+  code renders the failure and no reason. If upstream ever starts returning an `error` shape
+  that classifier rejects, that combination becomes reachable and the branch has to come
+  back — checklist 22 is what notices the classifier changing.
 - **The next refresh is a due time, not a schedule.** The sweep runs on its own interval,
   so the refresh happens on the first tick after the moment shown. No interval is quoted
   here because `DEFAULT_INTERVAL_MS` in `backgroundTokenRefresh.js` is not exported — read
@@ -1563,6 +1601,27 @@ safety bound rather than a preference. So `settingsRepo.js` and
 - **A failed `/api/token-status` fetch hides every line** rather than showing an error. The
   state stays an empty map, which renders identically to a list where nothing is eligible.
   Diagnose it from the network tab, not the row.
+- **The sweep pays one extra database write per refreshed connection, and this is the one
+  cost with no upstream work to hide behind.** `recordRefreshAttempt` is `await`ed inside
+  `checkAndRefreshToken`, so `refreshOne` in `backgroundTokenRefresh.js` now performs a
+  transactional `updateProviderConnection` for every connection it refreshes, in a loop that
+  upstream runs with none. On the request path the refresh's own network call dominates it;
+  in the sweep there is nothing to dominate it, and the loop's width is the whole eligible
+  set rather than one connection.
+
+  **Scale it against your own install, not a number written here.**
+  `/api/token-status` gives the eligible count directly, and that is the upper bound on
+  writes per sweep. On the install this was built on it is 498 of 645 connections.
+
+  **One unexplained event, recorded because nothing else in this document would lead you
+  here.** During a smoke run the server died mid-sweep while upstream's `_refreshProjectId`
+  was flooding `[ProjectId] onboardUser attempt N failed … retrying` across the 81
+  antigravity connections. **The cause was not determined** — no error was captured, and the
+  flood is upstream's own retry loop, so it is at least as likely a candidate as these
+  writes. What makes this worth a bullet is that the write is fail-open and logged at debug,
+  so it cannot report a problem with itself: if a large install shows the sweep struggling,
+  measure before assuming the flood is the whole story. `DISABLE_BACKGROUND_TOKEN_REFRESH`
+  turns the sweep off entirely and is the cheapest way to test whether it is involved.
 - **Nothing on media-provider connections**, same divergent-copy reason as the two buttons.
 - **The field is carried into safety backups**, unlike the `logs` feature's data.
   `src/lib/db/backup.js` copies every table except `requestDetails`, and
@@ -1813,11 +1872,12 @@ reader is the cheaper side to move.
     deny-by-default branch. Post-merge step 5 is what catches a reordering, and it now
     covers both prefixes.
 
-17. **[locks] The reset route still uses upstream's lock-key helpers.**
+17. **[locks] The reset route still uses upstream's lock-key helper.**
     `buildClearModelLocksUpdate` must keep enumerating `modelLock_*` by prefix off the
-    record rather than from a fixed list, and `MODEL_LOCK_PREFIX` must stay exported. A
-    fixed list means the reset misses any lock key upstream adds later, and the row keeps
-    a cooldown the button claims to have cleared.
+    record rather than from a fixed list. A fixed list means the reset misses any lock key
+    upstream adds later, and the row keeps a cooldown the button claims to have cleared.
+    This helper is the route's only import from `accountFallback.js` — `MODEL_LOCK_PREFIX`
+    is deliberately not imported, so no lock-key string appears in fork code at all.
 
     ```
     git grep -n --untracked "buildClearModelLocksUpdate" -- open-sse src
@@ -1827,10 +1887,10 @@ reader is the cheaper side to move.
     call in `src/app/api/locks/reset/route.js`. Read the definition, not just the count —
     the count cannot tell a prefix scan from a fixed list.
 
-    Do not widen this grep to `MODEL_LOCK_PREFIX`: upstream's
-    `src/app/api/models/availability/route.js` declares its own local copy of that string
-    rather than importing it, so the results mix two independent definitions. The reset
-    route imports the real one.
+    Do not widen this grep to `MODEL_LOCK_PREFIX`: no fork file references it, and
+    upstream's `src/app/api/models/availability/route.js` declares its own local copy of
+    that string rather than importing it, so the results would be entirely upstream's and
+    would mix two independent definitions.
 
 18. **[conntest] `POST /api/providers/[id]/test` still answers `{ valid, error }`**, and
     the page's `oneByOneResults` entries are still shaped `{ state, error }`. The row
@@ -2003,17 +2063,20 @@ npm run build          # /api/logs/records, /api/logs/session/[name], /api/locks
                        # and /api/token-status in the route list
 ```
 
-A plain checkout is not clean, so `npx eslint .` cannot answer whether the fork is. At
-`v0.5.59` it reports 348 problems, 150 errors and 198 warnings, all inherited from
-upstream. The two largest rules are `import/no-anonymous-default-export` and
-`react-hooks/set-state-in-effect`, the latter concentrated in
-`src/shared/components/ModelSelectModal.js` and across the tool cards under
-`src/app/(dashboard)/dashboard/cli-tools/components/`.
+A plain checkout is not clean, so `npx eslint .` cannot answer whether the fork is. On this
+tree at `v0.5.59` it reports 333 problems, 135 errors and 198 warnings, all inherited from
+upstream, led by `import/no-anonymous-default-export` and `react-hooks/set-state-in-effect`.
 
-**Do not expect the individual card names to hold** — which cards lead shifts with
-every upstream release, and the fork owns none of them. The total is quoted because it
-moves with upstream and its moving is uninteresting; the number that matters is the one
-below, on the fork's own files. Lint those to get a clean signal.
+**Treat that whole-repo total as a property of one working tree, not of `v0.5.59`, and never
+diff it across two runs** — a build between them changes it. `eslint.config.mjs` ignores only
+`.next/**`, `out/**`, `build/**` and `next-env.d.ts`, so **any other build-output directory
+present gets linted**, and `.gitignore` hides exactly those from `git status`. The case that
+happened: `next build` with a different `distDir` leaves a full copy of `src` under
+`.next-analyze/standalone/`, and while it was there this total read 348 problems and 150
+errors — fifteen of them the fork's own files counted twice. Confirmed by dropping a known
+violation into `.next-analyze/` and watching the count move. Either add such a directory to
+`globalIgnores` before quoting a number, or skip the whole-repo run and lint the fork's own
+files, which is the only signal that means anything.
 
 **Lint the added files and the modified ones separately.** The added files must come back
 completely clean; the modified ones carry upstream's pre-existing errors, so the only
@@ -2039,90 +2102,86 @@ cd tests && npm install
 npx vitest run
 ```
 
-**`tests/__baseline__/verify-no-regression.mjs` does not work on Windows.** It keys
-failures on `f.name.split("/app/")[1]`, a Docker path absent from any local checkout,
-so every existing failure registers as a regression. `known-fails.txt` is stale
-against this checkout too — the local Vitest version discovers considerably more tests
-than the baseline was recorded with.
+**Neither shipped baseline tool works here.** `tests/__baseline__/verify-no-regression.mjs`
+keys failures on `f.name.split("/app/")[1]`, a Docker path absent from any local checkout, so
+every existing failure registers as a regression; and `known-fails.txt` is stale, because the
+local Vitest discovers considerably more tests than it was recorded with. Compare the suite
+against itself instead.
 
-Compare the suite against itself instead. **`git stash` is the wrong tool once the fork
-is committed** — it captures working-tree and index changes, and a committed fork has
-neither, so the "base" run silently re-measures the fork and the comparison comes back
-empty. Check out upstream's copies of the modified files instead, and restore from
-`HEAD`:
+**Use a worktree, and link `node_modules` in *two* places.** `tests/` is an independent
+package, so a worktree borrowing only the root one leaves Vitest unresolvable: every file
+reports "No test suite found", which lands in the JSON as all-suites-failed with zero
+assertions and reads as a total regression.
 
 ```
-cd tests && npx vitest run --reporter=json --outputFile=fork.json
+git worktree add --detach /tmp/9r-base v0.5.59
+# link BOTH, from the fork checkout:
+#   <worktree>/node_modules        →  ./node_modules
+#   <worktree>/tests/node_modules  →  ./tests/node_modules
+# Windows: New-Item -ItemType Junction -Path <link> -Target <target>
+cd tests && npx vitest run --reporter=json --outputFile=fork.json   # in the fork
+                                                                    # then the same in the worktree → base.json
+```
+
+**Removing those links afterwards is the dangerous step on Windows.** `Remove-Item -Recurse`
+on a junction prompts and, if answered, deletes *through* it into the real `node_modules`.
+Delete the reparse point alone — `[System.IO.Directory]::Delete($link, $false)` or
+`cmd /c rmdir <link>` — then confirm `node_modules` still has its contents before
+`git worktree remove`.
+
+<details>
+<summary>In-place alternative, if a worktree is impractical</summary>
+
+Check out upstream's copies of the modified files and restore from `HEAD`:
+
+```
 cd .. && git checkout upstream/master -- <the modified files from the inventory>
 cd tests && npx vitest run --reporter=json --outputFile=base.json
 cd .. && git reset -q HEAD -- . && git checkout -- .
 ```
 
-`git checkout <tree> -- <paths>` stages what it writes, which is why the restore needs
-the `reset` as well as the `checkout` — and why `git status` looks clean rather than
-dirty while the base run is in progress. Confirm `src/sse/services/auth.js` actually
-reverted before trusting the base numbers; it is the file the comparison is most about.
+`git checkout <tree> -- <paths>` stages what it writes, so the restore needs the `reset` as
+well as the `checkout` — and `git status` looks *clean* rather than dirty while the base run
+is in progress, which is why an interrupted run can leave upstream's copies sitting in a
+checkout that looks fine. Confirm `src/sse/services/auth.js` actually reverted before
+trusting the base numbers; it is the file the comparison is most about. The worktree is
+preferred precisely because it never writes to the fork's own tree.
 
-**A separate worktree works and is the safer option, but it needs `node_modules` linked in
-*two* places.** `tests/` is an independent package, so a worktree that only borrows the
-root `node_modules` leaves Vitest itself unresolvable: every test file reports "No test
-suite found", which lands in the JSON as all-suites-failed with zero assertions, and the
-assertion diff then reads as a total regression. Link both and the baseline is real:
+</details>
 
-```
-git worktree add --detach /tmp/9r-base v0.5.59
-# then link BOTH, from the fork checkout:
-#   <worktree>/node_modules        →  ./node_modules
-#   <worktree>/tests/node_modules  →  ./tests/node_modules
-# Windows: New-Item -ItemType Junction -Path <link> -Target <target>
-```
+**Check the report size either way — it is the tell that the run was real.** Roughly 770 KB
+valid, about 65 KB broken. That catches a silently failed `git checkout` too.
 
-Verified at `v0.5.59`: 216 files, 1937 passing and 88 failing assertions across 30 files —
-the same numbers the in-place method gives, which is what makes the two mutually
-confirming. **Prefer it over the in-place `git checkout upstream/master -- <files>` above**,
-because it never writes to the fork's own working tree, so an interrupted run cannot leave
-upstream's copies sitting in a checkout that `git status` calls clean.
+Then read the two JSON files:
 
-**Check the report size either way — it is the tell that the run was real.** A valid run of
-this suite writes roughly 770 KB, a broken one about 65 KB. That applies to the in-place
-method too: a `git checkout` that silently failed produces the same empty comparison.
-
-**Removing the links afterwards is the dangerous step on Windows.** `Remove-Item -Recurse`
-on a junction prompts and, if answered, deletes through it into the real `node_modules`.
-Delete the reparse point alone — `[System.IO.Directory]::Delete($link, $false)`, or
-`cmd /c rmdir <link>` — then verify `node_modules` still has its contents before running
-`git worktree remove`.
-
-Diff the `fullName` values of failed assertions. A regression is a name failing in
-`fork.json` but not in `base.json`. Judge only by that: the totals wobble between runs
-because the suite contains live-provider and timing-sensitive tests. At `v0.5.59` the
-suite discovers 2084 tests across 216 files, and 88 assertions in 30 files fail on the
-upstream side; the fork's side is 86, because of the two it fixes.
-
-**Compare the file-level results too, not only assertion names.** A suite can fail with
-every assertion passing — a throw in `beforeAll` or `afterAll` produces no `fullName`,
-so an entire file blowing up is invisible in the comparison above. On Windows this is
-not hypothetical: temp-directory cleanup in an `afterAll` raises `EPERM` while a handle
-is still open. Diff the failed `testResults[].name` paths alongside the assertion names.
+- **Diff the `fullName` values of failed assertions.** A regression is a name failing in
+  `fork.json` but not `base.json`. Judge only by that — the totals wobble between runs
+  because the suite contains live-provider and timing-sensitive tests. Verified at `v0.5.59`:
+  216 files, 2084 tests discovered, 1937 passing, and 88 failing assertions across 30 files on
+  the upstream side against 86 on the fork's, because of the two it fixes. Both methods give
+  the same numbers, which is what makes them mutually confirming.
+- **Diff the failed `testResults[].name` paths as well.** A suite can fail with every
+  assertion passing: a throw in `beforeAll` or `afterAll` produces no `fullName`, so an entire
+  file blowing up is invisible in the comparison above. Not hypothetical on Windows —
+  temp-directory cleanup in an `afterAll` raises `EPERM` while a handle is still open.
 
 Two things to control for:
 
-- **Clear `ENABLE_REQUEST_LOGS` before measuring.** Vitest does not load `.env`, but if
-  the variable is exported in your shell it overrides `enableObservability` and several
-  assertions in `unit/request-details-tab.test.js` flip. Both runs must see the same
-  value or they are not comparable.
-- Vitest rewrites `tests/translator/__snapshots__/*.snap`, mostly LF → CRLF. Check with
+- **Clear `ENABLE_REQUEST_LOGS` before measuring.** Vitest does not load `.env`, but if the
+  variable is exported in your shell it overrides `enableObservability` and flips several
+  assertions in `unit/request-details-tab.test.js`. Both runs must see the same value.
+- Vitest rewrites `tests/translator/__snapshots__/*.snap`, mostly LF → CRLF; check with
   `git diff --ignore-cr-at-eol` and revert the noise. **It also re-creates
-  `golden-url-header.test.js.snap`, which upstream deleted in `2203cd8f` while keeping
-  the test.** That one arrives untracked rather than modified, so a `git checkout --` of
-  the snapshot directory misses it and it is one `git add .` from being committed back.
-  Delete it explicitly.
+  `golden-url-header.test.js.snap`, which upstream deleted in `2203cd8f` while keeping the
+  test.** That one arrives *untracked* rather than modified, so a `git checkout --` of the
+  snapshot directory misses it and it is one `git add .` from being committed back. Delete it
+  explicitly.
 
-The fork should pass two tests upstream fails, both in `unit/request-details-tab.test.js`
-and both because recording is on by default: `returns unique provider list without
-parsing data blobs` and `oversized field → stored truncated + reparseable (no circular)`.
-Confirmed still true at `v0.5.59`, and they are the *only* two — anything else appearing
-on that side of the diff is worth reading rather than welcoming.
+The fork should pass exactly two tests upstream fails, both in
+`unit/request-details-tab.test.js` and both because recording is on by default: `returns
+unique provider list without parsing data blobs` and `oversized field → stored truncated +
+reparseable (no circular)`. Confirmed at `v0.5.59`. Anything else on that side of the diff is
+worth reading rather than welcoming.
 
 ### Post-merge check
 
@@ -2178,11 +2237,10 @@ Expect `name`, `sourceFormat`, `targetFormat`, `model`, `timestamp` and a `stage
 array: five to seven entries when the provider answered successfully, four when it
 answered with an error, fewer still if the request never got that far. Confirm
 `4_req_target.json` is present rather than counting entries — that is the stage which
-means the provider was reached. Read "Stage count varies per row" under the `logs`
-feature's own "Known limitations" before treating a short array as a fault. (Named
-rather than linked: four sections carry that heading, so its generated id is positional
-and would retarget the moment a feature is added or reordered.) No
-`outcome` key — that belongs to the list endpoint alone. Confirm a `headers` object shows `<redacted>` rather than a live token: since
+means the provider was reached. Read "Stage count varies per row" in
+[Known limitations — logs](#known-limitations--logs) before treating a short array as a
+fault. No `outcome` key — that belongs to the list endpoint alone. Confirm a `headers`
+object shows `<redacted>` rather than a live token: since
 the reader does not mask, this is reading the file itself, so it is the real check on
 checklist item 2 and the reason to run it after every merge.
 
@@ -2259,9 +2317,9 @@ curl -s -X POST localhost:20127/api/locks/reset \
   -H 'Content-Type: application/json' -d '{"connectionId":"<id from step 6>"}'
 ```
 
-Expect `{"ok":true,"cleared":N}`. **Do not judge by `N`** — it counts every `modelLock_*`
-key that held a value, expired ones included, so it can be non-zero with nothing live
-released. It is a hint, not the assertion.
+Expect `{"ok":true}`, and nothing else — the route reports no count, because no honest one
+exists (see [The reset route](#the-reset-route)). A `200` here proves only that the update
+ran.
 
 The assertion is the record. Re-read that connection and confirm **all five** of
 `testStatus: "active"`, `lastError: null`, `errorCode: null`, `lastErrorAt: null`,
@@ -2283,9 +2341,16 @@ steps above touch the UI:
 - Every row has a **Test** button; clicking one turns the badge beside the name to
   `testing` and then `success` or `failed: <message>`. If the badge never appears,
   `oneByOneResults`'s `{ state, error }` shape changed.
+- **The rest of that row updates too**, which is the separate assertion: after the test the
+  status badge, the red `lastError` text and the `tokenstat` line all reflect what the route
+  just wrote. A badge that changes while everything else on the row stays put means
+  `handleTestConnection` lost its `await fetchConnections()`.
 - A row with an active cooldown or a `lastError` also has an **Unlock** button, and a
   healthy row does not. Present on every row means `isCooldown` or `connection.lastError`
-  stopped resolving; absent on a locked row means the same in the other direction.
+  stopped resolving; absent on a locked row means the same in the other direction. A
+  **disabled** row shows none either way — `hasClearableLock` is gated on `isActive`, so
+  toggle one off with a lock on it and the button should disappear along with the cooldown
+  timer and the error text beside it.
 - The Settings page at `/dashboard/profile` shows the Account Lock Durations card with six
   fields, each showing upstream's value as placeholder text when empty.
 
@@ -2338,26 +2403,23 @@ connections present, points at checklist 19 — something stopped going through
 
 **Judge the schedule structurally, not by eye.** Pick one entry with a recorded success and
 confirm `attempt.at` and `lastRefreshAt` agree **to within a few milliseconds**, which is
-what "the same refresh wrote both" actually looks like. **Do not test them for equality.**
-They come from two different `Date.now()` calls — `buildRefreshAttempt` takes its own
-`nowMs`, and upstream stamps `lastRefreshAt` separately — so they routinely differ by 1 or
-2 ms and neither value is wrong. Measured twice on the same install, 364 recorded successes
-each time: first 217 exactly equal and 147 off by 1 to 2 ms; then 228 exactly equal, 134 off
-by 1 ms, one off by 2 ms and one off by 4 ms. So an exact-equality check reports roughly 40%
-of a healthy install as broken — and **do not read the spread as a bound either.** The
-second reading produced a 4 ms sample the first did not; the two `Date.now()` calls are
-ordered, not spaced, so any gap short enough to belong to one write is fine and no ceiling
-written here would survive the next reading. What a real fault looks like is a gap of seconds
-or more, one of the two fields missing entirely, or the sign reversed.
+what "the same refresh wrote both" actually looks like. **Do not test them for equality**, and
+**do not read the spread as a bound either.** They come from two separate `Date.now()` calls,
+so they routinely differ and neither value is wrong: measured twice on the same install over
+364 recorded successes, first 217 exactly equal with 147 off by 1 to 2 ms, then 228 equal with
+134 off by 1 ms, one by 2 and one by 4. An equality check therefore reports roughly 40% of a
+healthy install as broken, and the 4 ms sample the second reading produced but the first did
+not is why no ceiling written here would survive the next one — the two calls are ordered, not
+spaced. A real fault is a gap of seconds or more, one field missing entirely, or the sign
+reversed.
 
-**Check the sign of that difference too, not just its size, because
-`isSupersededByLastRefresh` depends on it.** `attempt.at` must be the later of the two on a
-recorded success — that is what keeps the record from being discarded on read. If any entry
-comes back with `lastRefreshAt` ahead of `attempt.at`, the ordering inside
-`mergeRefreshedCredentials` has moved and every success is now being retired the moment it
-is written: the row keeps showing a plausible time and quietly loses the ability to say
-"failed". A `"ok":false` count that drops to zero on an install that used to have some is
-the same symptom seen from the other side.
+**The sign is the part `isSupersededByLastRefresh` depends on.** `attempt.at` must be the
+later of the two on a recorded success, which is what keeps the record from being discarded on
+read. An entry with `lastRefreshAt` ahead of it means the ordering inside
+`mergeRefreshedCredentials` has moved and every success is now retired the moment it is
+written: the row keeps a plausible time and quietly loses the ability to say "failed". A
+`"ok":false` count dropping to zero on an install that used to have some is the same symptom
+from the other side.
 
 Then confirm `nextRefreshDueAt − attempt.at` equals the token's lifetime minus
 `resolveRefreshLeadMs(provider)`. A wall-clock impression cannot check this — the two
