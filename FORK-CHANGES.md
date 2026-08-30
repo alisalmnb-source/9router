@@ -1613,15 +1613,31 @@ safety bound rather than a preference. So `settingsRepo.js` and
   `/api/token-status` gives the eligible count directly, and that is the upper bound on
   writes per sweep. On the install this was built on it is 498 of 645 connections.
 
-  **One unexplained event, recorded because nothing else in this document would lead you
-  here.** During a smoke run the server died mid-sweep while upstream's `_refreshProjectId`
-  was flooding `[ProjectId] onboardUser attempt N failed … retrying` across the 81
-  antigravity connections. **The cause was not determined** — no error was captured, and the
-  flood is upstream's own retry loop, so it is at least as likely a candidate as these
-  writes. What makes this worth a bullet is that the write is fail-open and logged at debug,
-  so it cannot report a problem with itself: if a large install shows the sweep struggling,
-  measure before assuming the flood is the whole story. `DISABLE_BACKGROUND_TOKEN_REFRESH`
-  turns the sweep off entirely and is the cheapest way to test whether it is involved.
+  **Measured, and the write is not the cost to worry about.** A sweep that refreshed 81
+  connections wrote all 81 attempts inside a 3004 ms window, consecutive writes a median of
+  1 ms apart, with only two gaps over 100 ms — and those two are the network refreshes, not
+  the writes. Reproducing the same fan-out twice cost +45 MB of RSS and +388 open handles at
+  peak, both fully reclaimed within 20 s. Read the spread off the stored `at` values if you
+  ever need to re-measure: they are written one per connection, so their range is the wall
+  time the whole fan-out took.
+
+  **Watch the fan-out width instead, which is upstream's and unbounded.**
+  `runBackgroundTokenRefreshTick` maps every due connection through `Promise.allSettled` with
+  no concurrency limit, and expiries cluster hard because a sweep gives everything it
+  refreshes the same lifetime — on this install 281 connections share one expiry second and
+  all 80 antigravity ones share a four-second window, so a single tick fans out to the whole
+  cluster. `DISABLE_BACKGROUND_TOKEN_REFRESH` turns the sweep off entirely and is the
+  cheapest way to take it out of a diagnosis.
+
+  **One event stayed unexplained.** During a smoke run the server died mid-sweep while
+  upstream's `_refreshProjectId` flooded `[ProjectId] onboardUser attempt N failed …
+  retrying` across the antigravity connections — 400 futile POSTs per sweep, five attempts
+  each. That flood reproduces exactly and is entirely benign on its own; two runs of the
+  identical sweep survived, so **the death did not reproduce** and the only difference was a
+  browser session rendering a 281-row page at the same time. Worth knowing while looking:
+  **no `unhandledRejection` or `uncaughtException` handler exists anywhere in this repo**, so
+  one unhandled rejection terminates the process with essentially no output, which fits an
+  instant death with nothing captured better than the 4 GB heap limit does.
 - **Nothing on media-provider connections**, same divergent-copy reason as the two buttons.
 - **The field is carried into safety backups**, unlike the `logs` feature's data.
   `src/lib/db/backup.js` copies every table except `requestDetails`, and
@@ -2395,8 +2411,18 @@ Expect a `statuses` object keyed by connection id. Judge it on three things, str
 curl -s localhost:20127/api/token-status | grep -o '"ok":[a-z]*' | sort | uniq -c
 ```
 
-Needs one sweep to have run since the server started, so give it the initial delay plus a
-tick. Expect a non-zero count of `"ok":true`. Zero attempts recorded at all, with eligible
+**Needs one sweep to have run, and getting one to run takes more than waiting.** The
+scheduler is started from `initializeApp`, which runs from `src/app/layout.js`, so it needs a
+**dynamically rendered dashboard page** — `/dashboard/providers/<id>` will do it. A prerendered
+page such as `/dashboard` does not, because its layout ran at build time, and neither does an
+API route: `custom-server.js` has its own `server.once("listening")` start hook, but running it
+from the repo root prints `"next start" does not work with "output: standalone"` and that hook
+never fires. Confirmed by watching a server sit for four minutes with zero
+`BG_TOKEN_REFRESH` lines after only `/api/health` and `/dashboard`, then start its sweep ten
+seconds after one request to `/dashboard/providers/kiro`. Give it `INITIAL_DELAY_MS` plus a
+tick after that.
+
+Expect a non-zero count of `"ok":true`. Zero attempts recorded at all, with eligible
 connections present, points at checklist 19 — something stopped going through
 `checkAndRefreshToken` — or at the scheduler not running, which
 `DISABLE_BACKGROUND_TOKEN_REFRESH` also causes.
