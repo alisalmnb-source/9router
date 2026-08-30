@@ -1609,35 +1609,21 @@ safety bound rather than a preference. So `settingsRepo.js` and
   in the sweep there is nothing to dominate it, and the loop's width is the whole eligible
   set rather than one connection.
 
-  **Scale it against your own install, not a number written here.**
-  `/api/token-status` gives the eligible count directly, and that is the upper bound on
-  writes per sweep. On the install this was built on it is 498 of 645 connections.
+  **Measure it rather than trusting a figure, and measure it on your own install.** The
+  stored `at` values are the instrument: one is written per refreshed connection, so the
+  range across a batch is the wall time that fan-out took, and the gaps between consecutive
+  values are what a slow write would widen. The upper bound on writes per sweep is the
+  eligible count, which `/api/token-status` gives directly. Measured once at 498 eligible of
+  645 connections: a batch of 81 landed inside 3004 ms with consecutive writes a median of
+  1 ms apart, the only two gaps over 100 ms being the network refreshes — so on that install
+  the write was not the cost that mattered.
 
-  **Measured, and the write is not the cost to worry about.** A sweep that refreshed 81
-  connections wrote all 81 attempts inside a 3004 ms window, consecutive writes a median of
-  1 ms apart, with only two gaps over 100 ms — and those two are the network refreshes, not
-  the writes. Reproducing the same fan-out twice cost +45 MB of RSS and +388 open handles at
-  peak, both fully reclaimed within 20 s. Read the spread off the stored `at` values if you
-  ever need to re-measure: they are written one per connection, so their range is the wall
-  time the whole fan-out took.
-
-  **Watch the fan-out width instead, which is upstream's and unbounded.**
+  **What makes the width worth watching is upstream's, not the write.**
   `runBackgroundTokenRefreshTick` maps every due connection through `Promise.allSettled` with
-  no concurrency limit, and expiries cluster hard because a sweep gives everything it
-  refreshes the same lifetime — on this install 281 connections share one expiry second and
-  all 80 antigravity ones share a four-second window, so a single tick fans out to the whole
-  cluster. `DISABLE_BACKGROUND_TOKEN_REFRESH` turns the sweep off entirely and is the
-  cheapest way to take it out of a diagnosis.
-
-  **One event stayed unexplained.** During a smoke run the server died mid-sweep while
-  upstream's `_refreshProjectId` flooded `[ProjectId] onboardUser attempt N failed …
-  retrying` across the antigravity connections — 400 futile POSTs per sweep, five attempts
-  each. That flood reproduces exactly and is entirely benign on its own; two runs of the
-  identical sweep survived, so **the death did not reproduce** and the only difference was a
-  browser session rendering a 281-row page at the same time. Worth knowing while looking:
-  **no `unhandledRejection` or `uncaughtException` handler exists anywhere in this repo**, so
-  one unhandled rejection terminates the process with essentially no output, which fits an
-  instant death with nothing captured better than the 4 GB heap limit does.
+  no concurrency limit, and expiries cluster because a sweep gives everything it refreshes the
+  same lifetime, so one tick fans out to a whole cluster rather than to one connection. Same
+  install: 281 connections shared a single expiry second. That is the number to re-derive
+  before assuming this write is what a struggling sweep is struggling with.
 - **Nothing on media-provider connections**, same divergent-copy reason as the two buttons.
 - **The field is carried into safety backups**, unlike the `logs` feature's data.
   `src/lib/db/backup.js` copies every table except `requestDetails`, and
@@ -2411,16 +2397,14 @@ Expect a `statuses` object keyed by connection id. Judge it on three things, str
 curl -s localhost:20127/api/token-status | grep -o '"ok":[a-z]*' | sort | uniq -c
 ```
 
-**Needs one sweep to have run, and getting one to run takes more than waiting.** The
-scheduler is started from `initializeApp`, which runs from `src/app/layout.js`, so it needs a
-**dynamically rendered dashboard page** — `/dashboard/providers/<id>` will do it. A prerendered
-page such as `/dashboard` does not, because its layout ran at build time, and neither does an
-API route: `custom-server.js` has its own `server.once("listening")` start hook, but running it
-from the repo root prints `"next start" does not work with "output: standalone"` and that hook
-never fires. Confirmed by watching a server sit for four minutes with zero
-`BG_TOKEN_REFRESH` lines after only `/api/health` and `/dashboard`, then start its sweep ten
-seconds after one request to `/dashboard/providers/kiro`. Give it `INITIAL_DELAY_MS` plus a
-tick after that.
+**Needs one sweep to have run, and waiting is not enough to get one.** The scheduler starts
+from `initializeApp`, which runs from `src/app/layout.js`, so it takes a request to a
+**dynamically rendered** dashboard page — `/dashboard/providers/<id>`. A prerendered page such
+as `/dashboard` will not do it, because its layout ran at build time, and neither will an API
+route. `custom-server.js` has a `server.once("listening")` start hook of its own, but from the
+repo root it prints `"next start" does not work with "output: standalone"` and that hook never
+fires, so do not count on it. Watch for `BG_TOKEN_REFRESH` `Scheduler started` in the log,
+then give it `INITIAL_DELAY_MS` plus a tick.
 
 Expect a non-zero count of `"ok":true`. Zero attempts recorded at all, with eligible
 connections present, points at checklist 19 — something stopped going through
