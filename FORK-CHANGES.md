@@ -13,48 +13,18 @@ into it.
 
 ### Merge log
 
-- `v0.5.59` → `5920eec4`, 2026-08-29. **No counts moved**, 24/24. `errorConfig.js` and
-  `backgroundTokenRefresh.js` — the two most consequential upstream files — were absent
-  from upstream's diff entirely. **Conflicted:** `src/sse/services/auth.js`, in
-  `markAccountUnavailable`'s `resetsAtMs` branch; resolved by keeping upstream's
-  antigravity case with the fork's resolver as the cap on the other side, commented in
-  place. **Claims corrected rather than counts**, each rewritten where it lives: step 2 of
-  [How outcome is decided](#how-outcome-is-decided) (`onStreamComplete` now also fires from
-  `transform()`), a new third bullet in
-  [Known limitations — locks](#known-limitations--locks) (antigravity quota now bypasses
-  `markAccountUnavailable`), [The timeout](#the-timeout-is-the-only-new-behaviour) plus the
-  two rows repeating it (`fetchWithConnectionProxy` gained a 15 s per-fetch bound, giving
-  `TEST_TIMEOUT_MS` a lower bound), and post-merge step 10 (it said *equality* where the
-  comparison must be strict). Post-merge steps 1 to 5 and 9 to 11 pass; 6 to 8 were run
-  later, in the review below.
-
-  **Four defects found, none by a checklist item — that is the lesson of this merge.**
-  Recorded here because each one names a blind spot that is now covered elsewhere:
-
-  | Found by | Defect | Now covered by |
-  | --- | --- | --- |
-  | reading upstream's diff against [What upstream can break](#files-the-fork-depends-on-but-never-edits), too late | the 15 s bound above | doing step 1 *before* merging |
-  | the test comparison | the `locks` settings read failed open only on an *async* throw, taking down two cases in `github-monthly-usage-lock.test.js` | its row in [What upstream can break](#files-the-fork-depends-on-but-never-edits) |
-  | reading the whole fork diff | `handleForcedSSEToJson` never received a `reqLogger`, so every successful forced-SSE-to-JSON row was badged `Incomplete` | [The third response path](#the-third-response-path) |
-  | reviewing the two features that share a row | `handleTestConnection` never refetched, so the badge updated while four row fields it writes stayed stale | a bullet in post-merge step 8 |
-
-  The same review deleted seven pieces of dead or defensive code, each of which now says in
-  place why it is absent: `/api/locks/reset`'s unread `cleared` count (and
-  `MODEL_LOCK_PREFIX` with it), `CollapsibleSection`'s unpassed `badge` and `defaultOpen`,
-  the `!== undefined` half of `LogsTab`'s `stream` test, `TokenStatus`'s unreachable
-  non-permanent `attempt.code` branch, `readConfiguredMs`'s numeric-string arm, and
-  `readRefreshAttempt`'s shape screen for "an older build" of a field this diff introduces.
-  Two robustness fixes with no behavioural change: `fs.openSync` moved inside the `try` in
-  both `requestLogsFs.js` readers, and `hasClearableLock` gained the `isActive` gate its
-  neighbours had. Verified in a browser, not by reading: the Test click issues a fresh
-  `GET /api/providers` and `GET /api/token-status`, and on the `codex` list none of the 146
-  disabled rows carries an Unlock button while all 120 active errored ones do.
-
-  A pass over this document then corrected the `npx eslint .` figure and closed one gap —
-  see [Verifying](#verifying) for why that total is not reproducible, and
-  [Known limitations — tokenstat](#known-limitations--tokenstat) for the sweep's per-refresh
-  write. It also renamed the four `### Known limitations` headings per feature, retiring the
-  rule against linking to them.
+- `v0.5.59` → `5920eec4`, 2026-08-29. **No counts moved**, 24/24. **Conflicted:**
+  `src/sse/services/auth.js`, in `markAccountUnavailable`'s `resetsAtMs` branch; resolved by
+  keeping upstream's antigravity case with the fork's resolver as the cap on the other side,
+  commented in place. Claims rather than counts went stale, each rewritten where it lives:
+  [How outcome is decided](#how-outcome-is-decided) step 2,
+  [Known limitations — locks](#known-limitations--locks),
+  [The timeout](#the-timeout-is-the-only-new-behaviour) and post-merge step 10. The review
+  that followed found four defects, **none of them by a checklist item** — each blind spot
+  is now covered where the code lives, so read [The third response path](#the-third-response-path),
+  the `tests/unit/github-monthly-usage-lock.test.js` row in
+  [What upstream can break](#files-the-fork-depends-on-but-never-edits), and post-merge
+  step 8, rather than a retelling here. All eleven post-merge steps pass.
 - Fork point `699edac3`, tag `v0.5.55`. No merges before this.
 
 **Merging right now?** In order:
@@ -213,23 +183,23 @@ line 49, `logs/*`, is what keeps raw dumps out of version control — see the en
 
 ## Fork inventory
 
-Every file the fork touches, across all features. Fifteen modified, thirteen added,
-**+435 −32** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
-over the fifteen rows of the Modified table.
+Every file the fork touches, across all features. Sixteen modified, fourteen added,
+**+452 −49** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
+over the sixteen rows of the Modified table.
 
 ```
 git grep -l --untracked "FORK(" -- open-sse src
 ```
 
-That returns twenty-six code files — every modified one, plus every added one except the
+That returns twenty-eight code files — every modified one, plus every added one except the
 **two that belong to no feature and therefore carry no tag**: this document and
 `scripts/fork-check.mjs`. Both are listed in the Added table below, which is their only
 record; the scope above also does not reach `scripts/`, so tagging the script would not
 change the count either way.
 
 The bare `FORK(` prefix is what makes it whole-fork; a single feature is `FORK(logs)`,
-`FORK(locks)`, `FORK(conntest)` or `FORK(tokenstat)`, and those four sum to thirty-one
-rather than twenty-six because three files carry more than one tag — one carries two and
+`FORK(locks)`, `FORK(conntest)` or `FORK(tokenstat)`, and those four sum to thirty-three
+rather than twenty-eight because three files carry more than one tag — one carries two and
 two carry three.
 
 Keep `--untracked` on every grep in this document. A file added by the feature you are
@@ -256,6 +226,7 @@ harmless.
 | `src/lib/lockPolicy.js` | locks | The settings keys and the resolver that remaps upstream's computed cooldown onto a configured one. Pure, imported by both server and client. |
 | `src/app/api/locks/reset/route.js` | locks | Clears every `modelLock_*` on one connection plus the error state. The only fork route that mutates a connection. |
 | `src/app/(dashboard)/dashboard/profile/components/LockDurationsCard.js` | locks | The six duration fields on the Settings page. Reads and writes `/api/settings` itself. |
+| `src/shared/utils/usageTokens.js` | logs | `getInputTokens`, `getCachedTokens`, `getCacheCreationTokens`, imported by **both** Usage tabs. The one added file that exists to delete duplication rather than to add behaviour: these were local to `RequestDetailsTab.js` and copied into `LogsTab.js`, and the two tabs render the same `requestDetails` rows, so a drift showed two input counts for one request and no grep could see it. Pure, no imports. **A third copy still exists and is deliberately left alone:** `tests/unit/request-details-tab.test.js` inlines all three, with a comment saying it does so because the component is `"use client"` and cannot be imported. This module could now be imported there instead — it is client-safe *and* server-safe — but that is an upstream test file, and the fork edits none. So the test still asserts against its own copy; if these rules ever change, change that copy too. |
 | `src/shared/utils/connectionTest.js` | conntest | Client wrapper around `POST /api/providers/<id>/test`. Adds the timeout that route has no server-side equivalent for. |
 | `src/sse/services/tokenRefreshStatus.js` | tokenstat | Both halves of the feature's policy: the shape written to the record, and the read-side resolution of eligibility, permanence and the next due time. Holds `REFRESH_ATTEMPT_FIELD` and `REFRESH_ERROR_DETAIL_MAX`. **No database import** — the write call lives in `tokenRefresh.js`, matching `lockPolicy.js` and `requestLogsFs.js`. |
 | `src/app/api/token-status/route.js` | tokenstat | `GET`, one entry per connection, keyed by id. Names every field it emits instead of spreading the record, which is what keeps tokens out. The only fork route with no `LOCAL_ONLY_PATHS` entry — see its header for why. |
@@ -271,6 +242,7 @@ harmless.
 | `open-sse/handlers/chatCore/nonStreamingHandler.js` | logs | +3 −1 | Same, one call site. |
 | `open-sse/handlers/chatCore/sseToJsonHandler.js` | logs | +58 −2 | The dump field added to the local `ctx`, which is spread into both record calls. Then `reqLogger` in the signature and five calls through it — stage 5 once per branch, stage 7 once before each of the three returns. Mostly the docblock explaining why. See [The third response path](#the-third-response-path). |
 | `open-sse/utils/requestLogger.js` | logs | +26 −18 | `maskSensitiveHeaders` enabled and applied at all four write sites. |
+| `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js` | logs | +4 −17 | The three token helpers deleted and imported from `src/shared/utils/usageTokens.js` instead. **The only upstream file the fork edits without adding behaviour to it** — the edit exists so `LogsTab` can share one definition rather than a copy. Upstream re-adding its own local copies is a conflict that resolves by deleting them again, not by keeping both. |
 | `src/lib/db/repos/requestDetailsRepo.js` | logs | +24 | Stores the dump directory *name* as `logDir`; copies `stream` to the top level of the record. |
 | `src/lib/db/repos/settingsRepo.js` | logs | +9 −1 | `enableObservability` defaults to `true`; new `requestLogsMaxSessions`. |
 | `src/dashboardGuard.js` | logs, locks | +29 | `/api/logs` and `/api/locks` added to `LOCAL_ONLY_PATHS`. Mostly comment: the `/api/locks` entry records what the guard does *not* cover. |
@@ -278,7 +250,7 @@ harmless.
 | `src/sse/services/auth.js` | locks | +47 −3 | `markAccountUnavailable` reads settings once and routes two of its three cooldown branches through the resolver. The whole runtime footprint of configurable durations. Since `v0.5.59` the `resetsAtMs` branch also carries upstream's antigravity carve-out, which skips the cap rather than the resolver — the conflict landed exactly here, so the resolution is commented in place. The settings read is wrapped in `try`/`catch` rather than `.catch()`, which two upstream tests depend on — see `tests/unit/github-monthly-usage-lock.test.js` in "What upstream can break". |
 | `src/app/(dashboard)/dashboard/profile/page.js` | locks | +6 | One import, one render line for `LockDurationsCard`. |
 | `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | locks, conntest, tokenstat | +72 −1 | Two buttons — Unlock (conditional) and Test — plus `onResetLock`, `onTest`, `testBusy` and the local `resettingLock` state. Then one `tokenStatus` prop and one `<TokenStatus>` line in the info column. |
-| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +75 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. Both handlers end in `fetchConnections()`, because both routes write row fields beyond the one the button displays. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
+| `src/app/(dashboard)/dashboard/providers/[id]/page.js` | locks, conntest, tokenstat | +88 −1 | `handleResetConnectionLock`, `handleTestConnection`, and the three props. Both handlers end in `fetchConnections()`, because both routes write row fields beyond the one the button displays; `handleResetConnectionLock` additionally reports a non-2xx through `alert`, since nothing else on the row moves when it fails. `handleRunOneByOneTest` is untouched. Then the `tokenStatuses` state, a fifth entry in `fetchConnections`'s `Promise.all`, and one more prop. |
 | `src/sse/services/tokenRefresh.js` | tokenstat | +60 | `recordRefreshAttempt`, called from both branches of `checkAndRefreshToken`. The whole runtime footprint of the feature. Upstream's `if` condition line is untouched. |
 
 ## Rules that outlive a feature
@@ -392,6 +364,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `src/lib/db/repos/settingsRepo.js` | Checklist 8 |
 | `src/dashboardGuard.js` | Checklist 3 (`/api/logs`) and 16 (`/api/locks`) |
 | `src/app/(dashboard)/dashboard/usage/page.js` | Tab registration — the `inspector` key must not collide with upstream's `logs` |
+| `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js` | Only the import of `getInputTokens`, `getCachedTokens` and `getCacheCreationTokens` from `src/shared/utils/usageTokens.js`. **No checklist item, because both ways of getting this wrong are build failures rather than silent ones:** dropping the import leaves three undefined calls, and upstream re-adding its own local copies alongside the import is a `SyntaxError` — "Identifier 'getInputTokens' has already been declared", since an ES module cannot redeclare an imported binding. Verified by hand, not assumed. So a merge either resolves it or does not build; what it must not do is delete the import and keep upstream's copies, which builds and re-opens the drift the extraction closed. |
 | `src/sse/services/auth.js` | Checklists 11 to 15 — every one of them is about whether the resolver still receives what it expects. This is the one runtime file the `locks` feature edits, so a refactor of `markAccountUnavailable` lands here and nowhere else. |
 | `src/app/(dashboard)/dashboard/profile/page.js` | Nothing but the render line for `LockDurationsCard`. If upstream restructures the Settings page into tabs, the card needs a home in the new structure — it is self-contained, so that is a move, not a rewrite. |
 | `src/app/(dashboard)/dashboard/providers/[id]/ConnectionRow.js` | Both buttons live here. Upstream reworking the action cluster costs the two buttons; upstream renaming `isCooldown` or `connection.lastError` costs the Unlock button's visibility condition, which then either never appears or never hides. The `tokenstat` line is one self-contained element in the info column and moves with whatever that column becomes. |
@@ -415,7 +388,6 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `tests/unit/github-monthly-usage-lock.test.js` | **The only upstream test whose module doubles constrain fork code, and the fork does not edit it.** It mocks `@/lib/localDb` with `getProviderConnections` and `updateProviderConnection` only, and Vitest throws on reading an undeclared export of a mocked module. So the `getSettings()` call the `locks` feature added to `markAccountUnavailable` is reached by a mock that does not provide it, and the guard around that call has to survive a **synchronous** throw — `.catch()` on the returned promise does not, because no promise is created. Both of its cases exercise the `githubResetAtMs` branch, which never consults those settings, so the failure looks unrelated to anything configurable. Upstream adding a mocked export changes nothing; upstream adding *another* test that mocks this module and reaches `markAccountUnavailable` is covered by the same guard. Only the test comparison in [Verifying](#verifying) catches a regression here — no checklist item can. |
 | `src/app/api/settings/route.js` | Checklist 8 — `PATCH` deletes `PROTECTED_SETTING_KEYS` and lets everything else through. Turning that into an allowlist silently drops `requestLogsMaxSessions` and all six `lock*Ms` keys; the Settings card would keep reporting a successful save while every value reverted to upstream's. |
 | `src/app/api/usage/request-details/route.js` | Deliberately untouched — upstream's redaction has to stay as written. Also the reason record fields are treated as public: it forwards everything except the four payloads, and it is not local-only. |
-| `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js` | `LogsTab` carries copies of `getInputTokens`, `getCachedTokens` and `getCacheCreationTokens` from it, on purpose: the two tabs render the same rows, so a different rule in one would show two input-token counts for one request. Change either copy and change both. **Identical logic, not identical text** — `getCachedTokens` and `getCacheCreationTokens` are character-for-character copies, while `getInputTokens` matches only in its executable lines and carries a longer comment here explaining that it is a mirror. So a text diff of the three reports a difference that is not one, and nothing in the checklist can detect a real drift — the numbers stay plausible, they just disagree. |
 | `src/sse/services/backgroundTokenRefresh.js` | Checklist 20. **The most consequential file for `tokenstat`, and the fork does not touch it.** `tokenRefreshStatus.js` mirrors it twice over: its four conditions become `isRefreshEligible` plus the `scheduled` flag, and its `Math.max(getRefreshLeadMs(provider), BACKGROUND_REFRESH_LEAD_MS)` becomes `resolveRefreshLeadMs`. Both operands are imported, so upstream retuning `BACKGROUND_REFRESH_LEAD_MS` is handled automatically and removing the export is a build failure. **Read `loadActiveConnections` as well as the selector** — the `isActive` filter lives there, not in `selectConnectionsNeedingRefresh`, and the fork's first version of the mirror missed it for exactly that reason. A fifth condition anywhere in the path is the quiet failure: the sweep skips connections the fork still shows a due time for. Also owns the interval, which is why no time is quoted for it — see the feature's known limitations. |
 | `src/sse/services/auth.js` (the credential lookup) | Checklist 20's second half. `getProviderConnections({ provider, isActive: true })` is why `isActive` belongs in eligibility rather than in `scheduled`: a disabled connection is refreshed by neither the sweep nor a request, so there is no honest phrasing for it and the row shows nothing. If upstream ever stops filtering here, a disabled connection becomes refreshable on demand again and the exclusion turns from correct into over-eager. Note this file is already in the edits table for `locks`, but for `markAccountUnavailable` — a different function with a different risk. |
 | `open-sse/services/oauthCredentialManager.js` | Checklist 20, and the failure shape behind checklist 22. Owns `getCredentialExpiryMs` (the fork's only expiry reader, and the reason a numeric epoch in seconds or milliseconds both work), `getCredentialLastRefreshMs`, and `mergeRefreshedCredentials` — whose three possible returns are exactly what `buildRefreshAttempt` is written against: `null`, an unrecoverable-error object passed straight through, or merged credentials. A fourth return shape would land in the record as a reasonless failure. **Also the stamping order that `isSupersededByLastRefresh` rests on:** `mergeRefreshedCredentials` takes its `nowMs` before `buildRefreshAttempt` takes its own, so on the covered path `attempt.at` is the later of the two and keeps precedence. If upstream ever made `lastRefreshAt` the later stamp — or let a provider's own value win with a clock ahead of this host's — every successful attempt would be discarded on read and the row would lose its outcome wording while still showing a plausible time. No checklist item can see this; only post-merge step 10 can. |
@@ -835,10 +807,13 @@ mechanism to reach for here.
   written. Do not "fix" it; the parallel route is the whole point. The consequence of
   leaving it alone is a fork-wide constraint, not a logs one:
   [Rules that outlive a feature](#rules-that-outlive-a-feature).
-- **`src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js`** and the
-  Details tab — unchanged, still redacted.
-- **`src/app/(dashboard)/dashboard/usage/components/RequestLogger.js`** and the hidden
-  `?tab=logs` view.
+- **The Details tab's behaviour** — still reading the redacted route, still rendering the
+  same rows. Its file is the one exception in this list, and only barely:
+  `RequestDetailsTab.js` gained an import so the two tabs share one definition of the token
+  arithmetic. Nothing it displays changed.
+- **`src/shared/components/RequestLogger.js`** and the hidden `?tab=logs` view. Note the
+  path: it is a shared component reached through the barrel, not a sibling of the tabs under
+  `usage/components/`, which is where the other views in this list live.
 - **`streamingHandler.js`'s hardcoded `status: "success"`** — worked around in
   `resolveOutcome` rather than patched.
 - No table, column, index or `SCHEMA_VERSION` change anywhere.
@@ -1192,7 +1167,9 @@ more load-bearing than it is.
   a cell short. Cosmetic only, and it is the reason to keep Unlock conditional rather than
   always rendered.
 - **The button returns 403 over a tunnel or Tailscale**, because `/api/locks` is
-  loopback-only. The row simply does not change; there is no message.
+  loopback-only. `handleResetConnectionLock` reports it — the guard's own
+  `"Local only: CLI token required"` reaches an `alert`, as does any other non-2xx — but
+  the lock itself is untouched, so the row is unchanged apart from the message.
 - **Free, no-auth providers are never locked at all**, so nothing here applies to them.
   `markAccountUnavailable` returns early for `connectionId === "noauth"`.
 
@@ -1408,14 +1385,21 @@ the condition that decided whether to persist credentials. The alternative — h
 upstream's condition into a `const` — would have put a second copy of it in fork code and
 changed the line most likely to be retuned upstream.
 
-**`code` and `detail` record what upstream handed back, and nothing more.** Three failure
-shapes exist in `open-sse/services/tokenRefresh/providers.js`:
+**`classification` and `providerCode` record what upstream handed back, and nothing more.**
+Three failure shapes exist in `open-sse/services/tokenRefresh/providers.js`:
 
 | Shape | Stored as |
 | --- | --- |
-| `null` | `code: null, detail: null` |
-| `{ error: "unrecoverable_refresh_error", code }` | `code` is upstream's classification, `detail` the provider's own code |
-| `{ error: "invalid_grant" }` | `code` only |
+| `null` | `classification: null, providerCode: null` |
+| `{ error: "unrecoverable_refresh_error", code }` | `classification` from upstream's `error`, `providerCode` from upstream's `code` |
+| `{ error: "invalid_grant" }` | `classification` only |
+
+**The two stored names are deliberately not upstream's, and the mapping is crossed.**
+Upstream's `error` is its own classification and upstream's `code` is the provider's raw
+code, so reusing those names would leave this record with a `code` field meaning something
+different from the `code` it was read from — which reads as a bug at the assignment and
+invites a merge to "fix" it by swapping them, silently breaking `permanent` below. The
+write site names two locals for the same reason.
 
 **The first is by far the most common, and the feature has to be honest about it.** Most
 providers return a bare `null` on failure, so for most rows the answer is "failed, at this
@@ -1423,14 +1407,15 @@ time, reason unavailable". Digging a reason out per provider is exactly the per-
 code this feature exists without.
 
 **`permanent` is resolved at read time, not stored.** `resolveTokenRefreshStatus` asks
-upstream's own `isUnrecoverableRefreshError` about the stored `code`. Storing the flag
+upstream's own `isUnrecoverableRefreshError` about the stored `classification`, handing it
+back as `{ error: classification }` — the shape that function screens. Storing the flag
 would be a derived value that goes wrong the moment upstream retunes which codes count —
 and goes wrong plausibly, since a boolean still reads as a boolean. Resolving on read
 cannot drift from upstream at all, and upstream adding a permanent code upgrades every
 existing record for free.
 
-**`detail` is bounded by `REFRESH_ERROR_DETAIL_MAX` at the write point.** Load-bearing,
-not tidiness: `GET /api/providers` publishes this field, and that route is not
+**Both are bounded by `REFRESH_ERROR_DETAIL_MAX` at the write point.** Load-bearing,
+not tidiness: `GET /api/providers` publishes these fields, and that route is not
 loopback-only. Every shape upstream produces today is a short code, so the cap only fires
 if upstream starts returning prose — which is precisely the case where an unbounded copy
 could carry a URL or a token fragment onto a public route. See the record-fields entry in
@@ -1568,15 +1553,16 @@ safety bound rather than a preference. So `settingsRepo.js` and
   a false green: the record is never *newer* than reality, so the line can overstate a
   problem and never hide one. Closing the rest means a signal in `open-sse/` or in
   `testUtils.js`, and both are outside what this feature edits.
-- **Most failures have no reason.** See the shape table above. `code` and `detail` are
-  populated for the classified permanent cases and empty for everything else. **That is why
-  `TokenStatus.js` has no branch for a non-permanent `code`**, and the absence is structural
-  rather than an omission: `mergeRefreshedCredentials` passes an `error` field through only
-  when `isUnrecoverableRefreshError` accepts it, so a non-null `code` has already been
-  classified permanent by the same function that resolves the flag. A failed attempt with no
-  code renders the failure and no reason. If upstream ever starts returning an `error` shape
-  that classifier rejects, that combination becomes reachable and the branch has to come
-  back — checklist 22 is what notices the classifier changing.
+- **Most failures have no reason.** See the shape table above. `classification` and
+  `providerCode` are populated for the classified permanent cases and empty for everything
+  else. **That is why `TokenStatus.js` has no branch for a non-permanent `classification`**,
+  and the absence is structural rather than an omission: `mergeRefreshedCredentials` passes
+  an `error` field through only when `isUnrecoverableRefreshError` accepts it, so a non-null
+  `classification` has already been judged permanent by the same function that resolves the
+  flag. A failed attempt with no classification renders the failure and no reason. If
+  upstream ever starts returning an `error` shape that classifier rejects, that combination
+  becomes reachable and the branch has to come back — checklist 22 is what notices the
+  classifier changing.
 - **The next refresh is a due time, not a schedule.** The sweep runs on its own interval,
   so the refresh happens on the first tick after the moment shown. No interval is quoted
   here because `DEFAULT_INTERVAL_MS` in `backgroundTokenRefresh.js` is not exported — read
@@ -2015,10 +2001,11 @@ reader is the cheaper side to move.
     `tokenRefreshAttempt` without an error — the status line then falls back to upstream's
     `lastRefreshAt` with no outcome, which looks like a working display.
 
-    The half that needs reading: `buildRefreshAttempt` must keep passing both `code` and
-    `detail` through `reduceDetail`, bounded by `REFRESH_ERROR_DETAIL_MAX`. `GET
-    /api/providers` publishes this field to anyone who can reach the dashboard, so an
-    unbounded copy of a provider error body is a leak that no count here can detect.
+    The half that needs reading: `buildRefreshAttempt` must keep passing both
+    `classification` and `providerCode` through `reduceDetail`, bounded by
+    `REFRESH_ERROR_DETAIL_MAX`. `GET /api/providers` publishes these fields to anyone who
+    can reach the dashboard, so an unbounded copy of a provider error body is a leak that no
+    count here can detect.
 
 24. **All features:** both tables still match reality — the inventory for edited files,
     and "What upstream can break" for the ones the fork only depends on. The grep
@@ -2029,13 +2016,13 @@ reader is the cheaper side to move.
     git grep -l --untracked "FORK(" -- open-sse src
     ```
 
-    Expect twenty-six files. Use the bare prefix, not one feature's tag — three files
+    Expect twenty-eight files. Use the bare prefix, not one feature's tag — three files
     carry more than one tag, so per-feature greps overlap and none of them is the whole
-    fork. The per-feature counts sum to thirty-one, not twenty-six: one file carries two
+    fork. The per-feature counts sum to thirty-three, not twenty-eight: one file carries two
     tags and two carry three. The two untagged added files are outside this count by
     design; see the inventory.
 
-25. **Update the expected counts in items 1 to 23 if upstream legitimately changed
+25. **Update the expected counts in items 1 to 24 if upstream legitimately changed
     them — in this file *and* in `scripts/fork-check.mjs`.** Those numbers are assertions
     about upstream's code, so they go stale by design: a mismatch is an invitation to look,
     not proof of breakage. Once you have confirmed the new shape is correct, write the new
@@ -2089,7 +2076,7 @@ errors are `react-hooks/set-state-in-effect` in `page.js`, and the **warning is 
 `ConnectionRow.js`**, `react-hooks/exhaustive-deps`. Expect both line numbers to move
 rather than the counts — the fork adds lines above each. Adding
 `src/sse/services/tokenRefresh.js` to the same command changes nothing because that file
-is clean, and so are the other twelve modified files.
+is clean, and so are the other thirteen modified files.
 
 `react-hooks/set-state-in-effect` is the rule a new component will trip. The shape that
 passes is an async IIFE inside the effect guarded by a `cancelled` flag, never a
@@ -2110,26 +2097,41 @@ every existing failure registers as a regression; and `known-fails.txt` is stale
 local Vitest discovers considerably more tests than it was recorded with. Compare the suite
 against itself instead.
 
-**Use a worktree, and link `node_modules` in *two* places.** `tests/` is an independent
-package, so a worktree borrowing only the root one leaves Vitest unresolvable: every file
-reports "No test suite found", which lands in the JSON as all-suites-failed with zero
-assertions and reads as a total regression.
+**Use a worktree, and give it both `node_modules` — but only the root one may be a link.**
+`tests/` is an independent package, so a worktree borrowing only the root one leaves Vitest
+unresolvable: every file reports "No test suite found", which lands in the JSON as
+all-suites-failed with zero assertions and reads as a total regression.
+
+**`<worktree>/tests/node_modules` must be a real copy. A junction there fails, and it fails
+in disguise.** Vitest running through it never reaches the module graph: the reporter says
+`import 0ms`, every suite dies during collection, and the errors are *plausible* rather than
+obviously environmental — `TypeError: Cannot read properties of undefined (reading 'config')`
+attributed to the test file's own `describe(` line, mixed in with the genuine "No test suite
+found" from the `node:test` files. Both totals then read as a catastrophic fork regression.
+The tell is the pair: 216 suites failed with 0 tests collected, and `import 0ms`. The root
+`node_modules` junction is fine; only `tests/` is affected. It is 37 MB, so the copy costs
+seconds. Diagnosed by reproducing the same import chain under plain `node` with an alias
+hook, where it succeeded — so the fault is Vitest's resolution through the reparse point,
+not the tree.
 
 ```
 git worktree add --detach /tmp/9r-base v0.5.59
-# link BOTH, from the fork checkout:
-#   <worktree>/node_modules        →  ./node_modules
-#   <worktree>/tests/node_modules  →  ./tests/node_modules
-# Windows: New-Item -ItemType Junction -Path <link> -Target <target>
+# from the fork checkout:
+#   <worktree>/node_modules        →  link to ./node_modules       (junction is fine)
+#   <worktree>/tests/node_modules  →  REAL COPY of ./tests/node_modules
+# Windows: cmd /c mklink /J <link> <target>
+#          robocopy tests\node_modules <worktree>\tests\node_modules /E /MT:16
 cd tests && npx vitest run --reporter=json --outputFile=fork.json   # in the fork
                                                                     # then the same in the worktree → base.json
 ```
 
-**Removing those links afterwards is the dangerous step on Windows.** `Remove-Item -Recurse`
+**Removing the link afterwards is the dangerous step on Windows.** `Remove-Item -Recurse`
 on a junction prompts and, if answered, deletes *through* it into the real `node_modules`.
 Delete the reparse point alone — `[System.IO.Directory]::Delete($link, $false)` or
 `cmd /c rmdir <link>` — then confirm `node_modules` still has its contents before
-`git worktree remove`.
+`git worktree remove`. Check by file count, not by existence: 33,380 files at `v0.5.59`.
+The copied `tests/node_modules` is a plain directory, so `Remove-Item -Recurse` is correct
+for that one — check `(Get-Item $p -Force).Attributes` for `ReparsePoint` before choosing.
 
 <details>
 <summary>In-place alternative, if a worktree is impractical</summary>
@@ -2159,13 +2161,25 @@ Then read the two JSON files:
 - **Diff the `fullName` values of failed assertions.** A regression is a name failing in
   `fork.json` but not `base.json`. Judge only by that — the totals wobble between runs
   because the suite contains live-provider and timing-sensitive tests. Verified at `v0.5.59`:
-  216 files, 2084 tests discovered, 1937 passing, and 88 failing assertions across 30 files on
-  the upstream side against 86 on the fork's, because of the two it fixes. Both methods give
-  the same numbers, which is what makes them mutually confirming.
+  216 files, 653 suites, 2084 tests discovered, 1937 passing, and 88 failing assertions across
+  30 files on the upstream side against 86 on the fork's, because of the two it fixes. Both
+  methods give the same numbers, which is what makes them mutually confirming. Re-verified on
+  the worktree after the shared-`usageTokens` extraction: still 0 regressions and the same two
+  fixed, which is the only reason that edit to an upstream file is safe to keep.
+- **Key the diff on a path relative to `tests/`, not on the absolute one.** The worktree lives
+  somewhere else, so every `testResults[].name` differs between the two reports and a naive
+  set difference reports all 216 files as both new and gone.
 - **Diff the failed `testResults[].name` paths as well.** A suite can fail with every
   assertion passing: a throw in `beforeAll` or `afterAll` produces no `fullName`, so an entire
   file blowing up is invisible in the comparison above. Not hypothetical on Windows —
-  temp-directory cleanup in an `afterAll` raises `EPERM` while a handle is still open.
+  temp-directory cleanup in an `afterAll` raises `EPERM` while a handle is still open. 30 files
+  either side at `v0.5.59`; note `numFailedTestSuites` is a different number again (69 base, 67
+  fork) because it counts `describe` blocks, so do not compare the two figures to each other.
+- **Roughly a third of the failing suites are not failures.** Part of the tests directory is
+  written against `node:test` rather than Vitest — `unit/kimchi.test.js` and its neighbours
+  import `describe` from `node:test` — and Vitest reports each as "No test suite found in
+  file" while Node's own runner executes them and prints its own summary into the same
+  output. Identical on both sides, so it cancels in the diff; alarming only the first time.
 
 Two things to control for:
 
