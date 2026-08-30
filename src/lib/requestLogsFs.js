@@ -283,10 +283,23 @@ export function deriveOutcome(name) {
 /**
  * Did this record's stream reach buildOnStreamComplete's callback?
  *
- * That callback is invoked from the transform stream's flush, which a
- * TransformStream only runs on a clean close — never on abort or error. So the
- * row starts life with a placeholder body, zero tokens and ttft 0, and is
- * upserted with real values only once the stream ends properly.
+ * That callback fires from finalizeStream() in open-sse/utils/stream.js, reached from
+ * three kinds of place since v0.5.59 and deduplicated by a `finalized` flag: flush's
+ * normal end, an OpenAI Responses terminal event inside transform(), and flush's own
+ * catch. The part this function rests on survives all three: a TransformStream does not
+ * run flush at all on abort or cancel, and no terminal event arrives on a stream that
+ * died mid-flight, so an aborted stream never reaches the callback. Its row keeps the
+ * placeholder body, zero tokens and ttft 0, and is upserted with real values only once
+ * the stream ends.
+ *
+ * The flush catch is the one path that can report a stream that ended badly as one that
+ * ended: a throw while flush translates the tail still calls finalizeStream(), so the
+ * accumulated content reaches the record and this function answers "ok" although the
+ * transcript carries no terminal marker. resolveOutcome puts this signal ahead of the
+ * transcript, so the record wins. Deliberately not reordered for it — the common trigger
+ * is a client that has already disconnected, where the upstream attempt did finish and
+ * "ok" is the honest answer. Revisit only if upstream starts calling finalizeStream()
+ * somewhere a stream can still be running.
  *
  * Reads the record's `response`, which requestDetailsRepo replaces wholesale
  * with a {_truncated, …} stub past observabilityMaxJsonSize. A clipped response

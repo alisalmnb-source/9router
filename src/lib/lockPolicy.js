@@ -2,9 +2,15 @@
 //
 // open-sse computes cooldowns from static constants in config/errorConfig.js, in a
 // pure synchronous function that cannot read the database. This module remaps that
-// computed duration onto a configured one at the single point where every cooldown
-// path converges (markAccountUnavailable in src/sse/services/auth.js), so nothing
-// under open-sse/ has to change.
+// computed duration onto a configured one inside markAccountUnavailable
+// (src/sse/services/auth.js), which every modality handler routes its failures through,
+// so nothing under open-sse/ has to change.
+//
+// One path escapes it, as of v0.5.59: an antigravity quota block. src/sse/handlers/chat.js
+// hard-codes shouldFallback and skips markAccountUnavailable entirely when
+// handleAntigravityQuotaError comes back with a resetAt, so no configured duration is
+// consulted and no modelLock_* is written. See the locks known limitations in
+// FORK-CHANGES.md.
 //
 // Two properties are load-bearing:
 //
