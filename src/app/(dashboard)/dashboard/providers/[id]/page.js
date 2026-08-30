@@ -759,9 +759,17 @@ export default function ProviderDetailPage() {
   };
 
   // FORK(locks): /api/locks/reset is in LOCAL_ONLY_PATHS, so this answers on loopback
-  // only — with the dashboard open over a tunnel or Tailscale it returns 403 and the row
-  // simply does not change. Refetch rather than patch local state: the route also resets
-  // testStatus, lastError, errorCode and backoffLevel.
+  // only — with the dashboard open over a tunnel or Tailscale it returns 403. Refetch
+  // rather than patch local state: the route also resets testStatus, lastError, errorCode
+  // and backoffLevel.
+  //
+  // The failure has to be reported, and that is not a style choice here. Nothing else on
+  // the row changes when this fails, so a swallowed error leaves the button looking inert
+  // and gives no way to tell "already unlocked" from "the guard refused you" — and the
+  // 403 above is a routine case, not an edge one. alert() is how every other failed
+  // mutation on this page reports itself. The body is parsed defensively because both
+  // senders answer with JSON but neither is guaranteed to: the guard returns
+  // { error: "Local only: CLI token required" } and the route its own { error }.
   const handleResetConnectionLock = async (connectionId) => {
     try {
       const res = await fetch("/api/locks/reset", {
@@ -769,9 +777,14 @@ export default function ProviderDetailPage() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ connectionId }),
       });
-      if (res.ok) await fetchConnections();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        alert(data.error || `Failed to clear locks (${res.status})`);
+        return;
+      }
+      await fetchConnections();
     } catch (error) {
-      console.log("Error resetting connection lock:", error);
+      alert(error?.message || "Failed to clear locks");
     }
   };
 
