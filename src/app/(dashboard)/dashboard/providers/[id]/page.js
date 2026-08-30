@@ -730,6 +730,19 @@ export default function ProviderDetailPage() {
   // loop through runConnectionTest would remove upstream's duplicate fetch, but it would
   // also put a function this fork rewrote onto the merge-conflict surface for no visible
   // gain. The duplication that remains is upstream's, and upstream maintains it.
+  //
+  // The refetch is NOT optional, and the badge is not what needs it. POST
+  // /api/providers/<id>/test writes four things this row already displays from
+  // `connections`: testUtils.js sets testStatus, lastError and lastErrorAt, and the
+  // refreshProviderCredentials call inside it stamps lastRefreshAt. Without the refetch
+  // the status badge, the red lastError text, the Unlock button's visibility and the
+  // whole TokenStatus line all keep pre-test state until something else reloads the list.
+  // The token line is the one that misleads: a connection with a failed refresh shows a
+  // green success badge beside a red "re-authentication needed" that the test just
+  // invalidated — the exact staleness isSupersededByLastRefresh
+  // (src/sse/services/tokenRefreshStatus.js) resolves server side and nothing was asking
+  // the server about. Upstream's one-by-one loop does not refetch either; that is
+  // upstream's to keep, not a precedent to copy.
   const handleTestConnection = async (connectionId) => {
     setOneByOneResults((prev) => ({
       ...prev,
@@ -740,6 +753,9 @@ export default function ProviderDetailPage() {
       ...prev,
       [connectionId]: { state: valid ? "success" : "failed", error: valid ? null : error },
     }));
+    // After the badge, so a slow list fetch cannot delay the result the button was
+    // pressed for. fetchConnections swallows its own errors, so this cannot throw.
+    await fetchConnections();
   };
 
   // FORK(locks): /api/locks/reset is in LOCAL_ONLY_PATHS, so this answers on loopback
