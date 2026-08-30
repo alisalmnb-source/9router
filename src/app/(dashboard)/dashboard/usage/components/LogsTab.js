@@ -170,8 +170,11 @@ function CopyButton({ text, label = "Copy" }) {
   );
 }
 
-function CollapsibleSection({ title, subtitle, badge, children, defaultOpen = false, icon = null }) {
-  const [isOpen, setIsOpen] = useState(defaultOpen);
+// Collapsed on mount, with no prop to override it: a session can hold ten stages and one
+// of them can be a megabyte of SSE frames, so opening any by default would make the panel
+// pay for reading them every time a row is opened.
+function CollapsibleSection({ title, subtitle, children, icon = null }) {
+  const [isOpen, setIsOpen] = useState(false);
 
   return (
     <div className="overflow-hidden rounded-lg border border-black/5 dark:border-white/5">
@@ -188,7 +191,6 @@ function CollapsibleSection({ title, subtitle, badge, children, defaultOpen = fa
         <span className="flex min-w-0 items-center gap-2">
           {icon && <span className="material-symbols-outlined text-[18px] text-text-muted">{icon}</span>}
           <span className="truncate text-sm font-semibold text-text-main">{title}</span>
-          {badge}
           {subtitle && <span className="hidden truncate text-xs text-text-muted sm:inline">{subtitle}</span>}
         </span>
         <span
@@ -316,7 +318,9 @@ function RecordPanel({ record, providerNameCache, accountMap }) {
         {record.errorStatus && record.outcome === "error" && (
           <Badge variant="error" size="md">HTTP {record.errorStatus}</Badge>
         )}
-        {record.stream !== null && record.stream !== undefined && (
+        {/* null is the only absent value to test for: /api/logs/records normalises the
+            field with `?? null` on the way out, so it is always present on a row. */}
+        {record.stream !== null && (
           <Badge variant={record.stream ? "info" : "default"} size="md">
             {record.stream ? "streaming" : "non-streaming"}
           </Badge>

@@ -17,10 +17,7 @@
 
 import { NextResponse } from "next/server";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/db/index.js";
-import {
-  MODEL_LOCK_PREFIX,
-  buildClearModelLocksUpdate,
-} from "open-sse/services/accountFallback.js";
+import { buildClearModelLocksUpdate } from "open-sse/services/accountFallback.js";
 
 export const dynamic = "force-dynamic";
 
@@ -41,10 +38,6 @@ export async function POST(request) {
     // it cannot miss a lock this route does not know about.
     const clearLocks = buildClearModelLocksUpdate(connection);
 
-    const cleared = Object.keys(connection).filter(
-      (key) => key.startsWith(MODEL_LOCK_PREFIX) && connection[key]
-    ).length;
-
     // Mirrors the reset block in clearAccountError (src/sse/services/auth.js). Clearing
     // the locks alone would leave testStatus "unavailable" and lastError on screen until
     // a real request succeeded, and would leave backoffLevel where it was so the next
@@ -58,7 +51,12 @@ export async function POST(request) {
       backoffLevel: 0,
     });
 
-    return NextResponse.json({ ok: true, cleared });
+    // No count in the body on purpose. The caller re-reads the connection list to redraw
+    // the row, so a number here would have no reader, and the only one worth reporting —
+    // how many locks were actually released — is not what a scan of the pre-update record
+    // measures: modelLock_* keys whose timestamp has already passed are still present on
+    // it and are cleared by the same update.
+    return NextResponse.json({ ok: true });
   } catch (error) {
     console.log("Error resetting connection locks:", error);
     return NextResponse.json({ error: "Failed to reset locks" }, { status: 500 });

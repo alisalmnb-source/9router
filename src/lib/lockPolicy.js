@@ -98,25 +98,19 @@ const UPSTREAM_DEFAULTS = new Map(
  * lock that has already expired, which reads as "no lock at all" and would quietly
  * turn off the backoff the rest of this feature exists to lengthen.
  *
- * The type is screened before Number() rather than after, and that ordering is the
- * guard rather than tidiness. Number() maps several non-numbers onto plausible small
- * positives — Number(true) is 1 and Number([5]) is 5 — so a value-only check would
- * honour either as a millisecond cooldown and land in exactly the case above. Nothing
- * in this fork produces such a value: the Settings card runs every field through
- * secondsToMs, which returns a number or null and nothing else. What makes the screen
- * worth keeping is the route rather than the card — PATCH /api/settings deletes
- * PROTECTED_SETTING_KEYS and forwards everything else, so whatever a caller sends
- * reaches the blob unexamined.
- *
- * Numeric strings stay accepted for that same caller's sake, not the card's. The card
- * writes milliseconds as a number; a hand-written PATCH sending "120000" is the only
- * thing the string branch is here for.
+ * Only a real number is accepted, and the type is tested rather than left to Number() to
+ * reject. That is the guard rather than tidiness: Number() maps several non-numbers onto
+ * plausible small positives — Number(true) is 1, Number([5]) is 5, Number("5") is 5 — and
+ * any of them would be honoured as a millisecond cooldown and land in exactly the case
+ * above. The Settings card cannot produce one, since it runs every field through
+ * secondsToMs, which returns a number or null and nothing else. PATCH /api/settings can:
+ * it deletes PROTECTED_SETTING_KEYS and forwards everything else, so whatever a caller
+ * sends reaches the blob unexamined. Anything that is not a number resolves to the
+ * upstream constant, which is what an unset field does too.
  */
 function readConfiguredMs(settings, key) {
   const raw = settings?.[key];
-  if (typeof raw !== "number" && typeof raw !== "string") return null;
-  const value = Number(raw);
-  return Number.isFinite(value) && value > 0 ? value : null;
+  return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
 }
 
 /** Configured value for `key`, falling back to the upstream constant. */

@@ -187,9 +187,28 @@ function resolveNextRefreshDueAt(connection) {
 }
 
 /**
- * Read the stored attempt back, screening anything that is not the shape this module
- * writes. The field lands in the connection's free-form `data` blob, so a value written
- * by an older build, or by hand, arrives here unvalidated.
+ * Read the stored attempt back.
+ *
+ * Deliberately NOT a validator for the whole shape. `buildRefreshAttempt` above is the
+ * only writer — nothing else in this repository names `REFRESH_ATTEMPT_FIELD` — and it
+ * emits all four keys unconditionally, so screening them would be defending against a
+ * producer that does not exist.
+ *
+ * The two checks that stay are about what a bad value does downstream, not about who
+ * wrote it:
+ *
+ *   - the object test, because the field lands in a free-form `data` blob and everything
+ *     below it reads properties off the result;
+ *   - `at` being a parseable date string, because `TokenStatus` hands it to
+ *     `getRelativeTime`, which is upstream's and carries no NaN guard of its own:
+ *     `Math.floor(NaN / 60000)` fails every comparison in it and the row renders
+ *     "refreshed NaNd ago". Returning null instead degrades to `lastRefreshAt`, or to "no
+ *     refresh recorded yet". The type and the parseability are one test rather than two
+ *     because they answer one question, and together they are what makes the `at: string`
+ *     in the return type below true rather than aspirational.
+ *
+ * `ok` is normalised rather than screened, so the returned shape is boolean by
+ * construction and no caller has to test it.
  *
  * @param {object} connection
  * @returns {{ at: string, ok: boolean, code: string|null, detail: string|null }|null}
@@ -197,15 +216,10 @@ function resolveNextRefreshDueAt(connection) {
 function readRefreshAttempt(connection) {
   const stored = connection?.[REFRESH_ATTEMPT_FIELD];
   if (!stored || typeof stored !== "object") return null;
-  if (typeof stored.at !== "string" || typeof stored.ok !== "boolean") return null;
-  // Parseability, not just the type. TokenStatus hands `at` to getRelativeTime, which
-  // is upstream's and carries no NaN guard of its own: Math.floor(NaN / 60000) fails
-  // every comparison in it and the row renders "refreshed NaNd ago". Dropping the whole
-  // attempt instead degrades to lastRefreshAt, or to "no refresh recorded yet".
-  if (Number.isNaN(new Date(stored.at).getTime())) return null;
+  if (typeof stored.at !== "string" || Number.isNaN(new Date(stored.at).getTime())) return null;
   return {
     at: stored.at,
-    ok: stored.ok,
+    ok: !!stored.ok,
     code: reduceDetail(stored.code),
     detail: reduceDetail(stored.detail),
   };
