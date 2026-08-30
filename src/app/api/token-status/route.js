@@ -54,7 +54,7 @@ export async function GET() {
 
     return NextResponse.json({ statuses });
   } catch (error) {
-    console.log("Error resolving token status:", error);
+    console.error("[API] /api/token-status failed:", error);
     return NextResponse.json({ error: "Failed to resolve token status" }, { status: 500 });
   }
 }

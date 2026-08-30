@@ -58,7 +58,7 @@ export async function POST(request) {
     // it and are cleared by the same update.
     return NextResponse.json({ ok: true });
   } catch (error) {
-    console.log("Error resetting connection locks:", error);
+    console.error("[API] /api/locks/reset failed:", error);
     return NextResponse.json({ error: "Failed to reset locks" }, { status: 500 });
   }
 }
