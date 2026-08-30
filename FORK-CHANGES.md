@@ -625,22 +625,33 @@ Remove the entry to allow remote access.
 a new key needs no migration, and `PATCH /api/settings` uses a blocklist rather than
 an allowlist, so it passes through with no route change.
 
-**There is no UI for either of these two keys.** They are set once in practice, and a
-dashboard control for a value you touch once is not worth the diff. Change them in
-`DEFAULT_SETTINGS`, or for a running install:
+**`requestLogsMaxSessions` has no UI.** It is set once in practice, and a dashboard control
+for a value you touch once is not worth the diff. Change it in `DEFAULT_SETTINGS`, or for a
+running install:
 
 ```
 PATCH /api/settings {"requestLogsMaxSessions":5000}
 ```
 
-**Do not read that as "the Settings page is untouched" — it is not.** The statement above
-is scoped to these two keys only: `locks` puts `LockDurationsCard` on the same page, so
-the page itself is not byte-identical to upstream. The `locks` feature's own settings do
-have a card; see [Feature: locks](#feature-locks).
+**`enableObservability` is different: upstream already ships a control for it, on this very
+page.** The "Enable Observability" card in
+`src/app/(dashboard)/dashboard/profile/page.js` is a `<Toggle>` bound to
+`updateObservabilityEnabled`, which `PATCH`es the key directly. The fork neither added it
+nor touches it, and that is what makes the changed default only a default: **one click
+there stores `false`, `mergeWithDefaults` lets a stored value win, and the Logs tab goes
+empty with nothing anywhere to explain it.** Read the toggle's state before trusting
+`DEFAULT_SETTINGS`, and read it before checklist 1 — a stored `false` and a broken `logDir`
+thread both produce a tab with nothing useful in it.
 
-> **Defaults do not reach an existing install.** `mergeWithDefaults` lets stored values
-> win, so an install created before this change keeps `enableObservability: false`.
-> Update it once:
+**Do not read either statement as "the Settings page is untouched" — it is not.** Both are
+scoped to these two keys: `locks` puts `LockDurationsCard` on the same page, so the page
+itself is not byte-identical to upstream. The `locks` feature's own settings do have a card;
+see [Feature: locks](#feature-locks).
+
+> **A stored value beats the default, and there are two ways to have one.**
+> `mergeWithDefaults` lets stored values win, so `enableObservability` reads `false` on an
+> install created before this change **and** on any install where someone has used the
+> toggle above. Neither case is visible in `DEFAULT_SETTINGS`. Set it once:
 >
 > ```
 > PATCH /api/settings {"enableObservability":true,"requestLogsMaxSessions":1000}
@@ -1364,7 +1375,7 @@ copy of a table upstream owns.
 ### The record field
 
 ```
-tokenRefreshAttempt: { at, ok, code, detail }
+tokenRefreshAttempt: { at, ok, classification, providerCode }
 ```
 
 Lands in the existing `data` JSON blob: **no migration, no `SCHEMA_VERSION` bump**, and no
@@ -2070,13 +2081,15 @@ files, which is the only signal that means anything.
 **Lint the added files and the modified ones separately.** The added files must come back
 completely clean; the modified ones carry upstream's pre-existing errors, so the only
 useful question there is whether the count changed. Stash the fork's edits to those files
-and lint them again to get the before number — `src/app/(dashboard)/dashboard/providers/[id]/page.js`
-and `ConnectionRow.js` together report three errors and one warning either way: the three
-errors are `react-hooks/set-state-in-effect` in `page.js`, and the **warning is in
-`ConnectionRow.js`**, `react-hooks/exhaustive-deps`. Expect both line numbers to move
-rather than the counts — the fork adds lines above each. Adding
-`src/sse/services/tokenRefresh.js` to the same command changes nothing because that file
-is clean, and so are the other thirteen modified files.
+and lint them again to get the before number — the sixteen modified files report **five
+errors and one warning either way**, all of it upstream's, out of three files:
+`src/app/(dashboard)/dashboard/providers/[id]/page.js` (three
+`react-hooks/set-state-in-effect`), `src/app/(dashboard)/dashboard/usage/components/RequestDetailsTab.js`
+(two more of the same, on upstream's own `useEffect` bodies — the fork's edit to that file
+adds one import and deletes three function definitions, none of them near those lines), and
+**the single warning, in `ConnectionRow.js`**, `react-hooks/exhaustive-deps`. Expect the
+line numbers to move rather than the counts — the fork adds lines above each. The other
+thirteen modified files are clean, `src/sse/services/tokenRefresh.js` among them.
 
 `react-hooks/set-state-in-effect` is the rule a new component will trip. The shape that
 passes is an async IIFE inside the effect guarded by a `cancelled` flag, never a
@@ -2454,8 +2467,9 @@ to look alike. Do it per provider and the mirror proves itself: providers whose 
 own. Both halves of the `Math.max` need to appear, or the check only exercised one branch.
 
 A failing entry is worth reading rather than treating as a fault: `ok: false` with
-`code: null` is the normal shape, because most providers return a bare `null`. An overdue
-`nextRefreshDueAt` alongside it is the exact condition this feature was built to surface.
+`classification: null` and `providerCode: null` is the normal shape, because most providers
+return a bare `null`. An overdue `nextRefreshDueAt` alongside it is the exact condition this
+feature was built to surface.
 
 Then open `/dashboard/providers/<provider>` and check the list:
 
