@@ -203,8 +203,15 @@ function readFileCapped(filePath) {
   if (!stat.isFile()) return null;
 
   if (stat.size > MAX_FILE_BYTES) {
-    const fd = fs.openSync(filePath, "r");
+    // openSync is inside the try, not before it, and the reason is the failure mode rather
+    // than style: a stage file can disappear or lock between the statSync above and this
+    // line — a concurrent pruneSessions, an external cleanup of logs/, a virus scanner
+    // holding a freshly appended transcript — and an uncaught throw here propagates out of
+    // readSession and 500s the whole request. Returning null instead skips one stage, which
+    // is what the under-cap branch below already does for the same error.
+    let fd;
     try {
+      fd = fs.openSync(filePath, "r");
       const buf = Buffer.alloc(MAX_FILE_BYTES);
       const read = fs.readSync(fd, buf, 0, MAX_FILE_BYTES, 0);
       return {
@@ -212,8 +219,10 @@ function readFileCapped(filePath) {
         truncated: true,
         originalSize: stat.size,
       };
+    } catch {
+      return null;
     } finally {
-      fs.closeSync(fd);
+      if (fd !== undefined) fs.closeSync(fd);
     }
   }
 
@@ -236,15 +245,20 @@ function readTail(filePath, bytes = TAIL_PROBE_BYTES) {
 
   const length = Math.min(bytes, stat.size);
   const position = stat.size - length;
-  const fd = fs.openSync(filePath, "r");
+  // openSync inside the try for the same reason as readFileCapped: this runs once per row
+  // in the list endpoint, so an uncaught throw here costs the whole page rather than one
+  // row's outcome. An empty tail resolves to "incomplete", which is what a row with no
+  // readable transcript should say.
+  let fd;
   try {
+    fd = fs.openSync(filePath, "r");
     const buf = Buffer.alloc(length);
     const read = fs.readSync(fd, buf, 0, length, position);
     return buf.subarray(0, read).toString("utf8");
   } catch {
     return "";
   } finally {
-    fs.closeSync(fd);
+    if (fd !== undefined) fs.closeSync(fd);
   }
 }
 
