@@ -375,6 +375,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `open-sse/services/tokenRefresh.js` and `open-sse/config/appConstants.js` | Checklists 21 and 22. `getRefreshLeadMs` is the per-provider lead, `REFRESH_LEAD_MS` is derived from `PROVIDER_OAUTH` rather than written down, and `isUnrecoverableRefreshError` is the sole source of the "re-authenticate" distinction. Upstream adding a permanent code there upgrades the fork's message with no edit; upstream removing the export is a build failure. Note the derivation is also why this module can never be imported client side — see the policy-module rule above. |
 | `open-sse/handlers/chatCore.js`'s 401 block and `open-sse/executors/base.js` | Known limitations — the refresh path `tokenstat` deliberately does not observe. `chatCore.js` calls `executor.refreshCredentials` directly, so the result never passes `mergeRefreshedCredentials` and its failure branch is a `log.warn` and nothing else. If upstream ever routes that block through `checkAndRefreshToken`, the gap closes for free — check whether it did. |
 | `src/lib/db/repos/connectionsRepo.js` | Checklist 23. `updateProviderConnection` merges `{ ...existing, ...data }` with no whitelist, which is the only reason `tokenRefreshAttempt` round-trips through the `data` blob without being declared anywhere. `OPTIONAL_FIELDS` is a whitelist in `createProviderConnection` only; extending it to the update path drops the field silently, and the status line reverts to reporting upstream's `lastRefreshAt` with no outcome — a plausible-looking display, not an error. |
+| `src/lib/db/index.js` and `src/lib/localDb.js` | How the fork routes reach the database, in **both spellings**: `logs/records/route.js` and `token-status/route.js` import from `db/index.js`, `locks/reset/route.js` from `localDb.js`. Same functions either way — `localDb.js` is a re-export shim over `src/lib/db/` — so this is one dependency written two ways, and no checklist item would surface it. `localDb.js` says "shim" in its own first line, but nearly every route under `src/app/api` imports through it, so retiring it would be a large upstream change and the fork's single import there would fail loudly. Unify toward `localDb.js` if you unify at all; it is the house convention by a wide margin. |
 | `src/app/api/providers/route.js` | Two ways. It publishes `tokenRefreshAttempt` whether the fork likes it or not, which is what makes the write-point reduction load-bearing (see the record-fields rule). And it blanks `refreshToken`, which is why eligibility cannot be decided in the browser and `/api/token-status` exists at all. Narrowing it to a whitelist would break far more than this feature; widening it to leak `refreshToken` would make the extra route pointless but harm nothing the fork owns. |
 | `src/shared/utils/index.js` | `TokenStatus.js` imports `getRelativeTime` from the barrel for past timestamps. Non-ticking and past-only by design, which is why the forward-looking half is formatted locally in that component rather than by a shared helper — there is none. |
 | `src/lib/db/backup.js` | Known limitations — `requestDetails` is excluded from backups |
@@ -888,11 +889,18 @@ The durations live in `open-sse/config/errorConfig.js` and are consumed by
 no database access. Settings are async and app-side. So the engine cannot read them, and
 teaching it to would mean handing the routing engine a database connection.
 
-Instead: **leave `open-sse/` completely alone and remap the computed duration at the one
-point where every cooldown path already converges.** `markAccountUnavailable` in
-`src/sse/services/auth.js` is that point — it already imported `getSettings`, it already
-held the only reader of `MAX_RATE_LIMIT_COOLDOWN_MS`, and it performs the single
+Instead: **leave `open-sse/` completely alone and remap the computed duration inside
+`markAccountUnavailable`** in `src/sse/services/auth.js`, which every modality handler
+routes its failures through — it already imported `getSettings`, it already held the only
+reader of `MAX_RATE_LIMIT_COOLDOWN_MS`, and it performs the single
 `updateProviderConnection` write that stores the lock.
+
+**It is not quite every cooldown path, and the exception arrived in `v0.5.59`.** An
+antigravity quota block never reaches this function at all: `src/sse/handlers/chat.js`
+hard-codes `shouldFallback` and skips the call when `handleAntigravityQuotaError` comes back
+with a `resetAt`, so no configured duration is consulted and no `modelLock_*` is written.
+That is the third bullet of this feature's Known limitations below, and it is the one gap in
+the "one convergence point" premise — everything else in this section still rests on it.
 
 Its three branches are treated differently, on purpose:
 
