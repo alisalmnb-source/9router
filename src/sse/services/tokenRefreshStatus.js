@@ -53,7 +53,7 @@ export const REFRESH_ATTEMPT_FIELD = "tokenRefreshAttempt";
  * that is exactly the case where an unbounded copy could carry a URL or a token
  * fragment onto a public route.
  */
-export const REFRESH_ERROR_DETAIL_MAX = 200;
+const REFRESH_ERROR_DETAIL_MAX = 200;
 
 /**
  * Reduce a provider-supplied string to something safe to publish: trimmed, bounded, or
@@ -134,7 +134,7 @@ export function buildRefreshAttempt(ok, refreshResult, nowMs = Date.now()) {
  * @param {object} connection
  * @returns {boolean}
  */
-export function isRefreshEligible(connection) {
+function isRefreshEligible(connection) {
   if (!connection) return false;
   // `=== false` rather than a truthiness test: `rowToConn` always materialises this as a
   // boolean, but a connection reaching here from anywhere else with the field absent
@@ -156,7 +156,7 @@ export function isRefreshEligible(connection) {
  * @param {string} provider
  * @returns {number} milliseconds
  */
-export function resolveRefreshLeadMs(provider) {
+function resolveRefreshLeadMs(provider) {
   const providerLead = getRefreshLeadMs(provider);
   return Math.max(
     Number.isFinite(providerLead) ? providerLead : 0,
@@ -180,7 +180,7 @@ export function resolveRefreshLeadMs(provider) {
  * @param {object} connection
  * @returns {string|null} ISO timestamp
  */
-export function resolveNextRefreshDueAt(connection) {
+function resolveNextRefreshDueAt(connection) {
   const expiresAtMs = getCredentialExpiryMs(connection);
   if (expiresAtMs === null) return null;
   return new Date(expiresAtMs - resolveRefreshLeadMs(connection?.provider)).toISOString();
@@ -260,10 +260,18 @@ function isSupersededByLastRefresh(attempt, lastRefreshMs) {
  * right. Resolving at read time cannot drift from upstream at all.
  *
  * `lastRefreshAt` is upstream's success-only stamp, and the two are not interchangeable:
- * it carries no outcome, so it can only ever say "refreshed", never "failed". Exactly one
- * of the pair is reported and the newer one wins — see `isSupersededByLastRefresh` for why
- * the fork's own record is not automatically the better of the two. Reporting both would
- * put two different "last refresh" times on one row.
+ * it carries no outcome, so it can only ever say "refreshed", never "failed".
+ *
+ * **Both fields are always emitted, and `attempt` is the one that wins.** The stale record
+ * is dropped by `isSupersededByLastRefresh` — see there for why the fork's own record is
+ * not automatically the better of the two — so `attempt` is null exactly when it must not
+ * be trusted, and only then does `lastRefreshAt` become the answer. That makes "prefer
+ * `attempt`, fall back to `lastRefreshAt`" a complete rule for a consumer, which is the
+ * one `TokenStatus.js` applies to put a single history line on the row. Do not reduce this
+ * to one field on the way out: `lastRefreshAt` is a success-only stamp, so suppressing it
+ * whenever an attempt survives would throw away the last known *success* time — the one
+ * thing a future consumer would want beside a failed attempt, and the one thing nothing
+ * else on the record carries.
  *
  * Returns `{ eligible: false }` and nothing else for a connection with no refresh to
  * report on, so the caller has one field to branch on and no half-filled object to

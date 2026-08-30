@@ -49,10 +49,14 @@ export default function TokenStatus({ status }) {
   // Three cases, in order of how much they tell you. The fork's own record is the richer
   // one because it carries an outcome, but it is not always the current one: several paths
   // refresh the token and stamp upstream's lastRefreshAt without recording an attempt, the
-  // Test button in this same row among them. /api/token-status compares the two and sends
-  // only the newer, so at most one arrives here — see isSupersededByLastRefresh in
-  // src/sse/services/tokenRefreshStatus.js. Showing both would put two different
-  // "last refresh" times on one row.
+  // Test button in this same row among them.
+  //
+  // **Both fields usually arrive, so this if/else chain is the choice, not a null check.**
+  // /api/token-status nulls `attempt` when it has been superseded rather than dropping
+  // `lastRefreshAt` — see isSupersededByLastRefresh in
+  // src/sse/services/tokenRefreshStatus.js — so preferring `attempt` here is what keeps
+  // one "last refresh" time on the row. Never render both branches; two timestamps that
+  // describe the same event, milliseconds apart, read as two refreshes.
   let historyText;
   let historyIsError = false;
   if (attempt) {

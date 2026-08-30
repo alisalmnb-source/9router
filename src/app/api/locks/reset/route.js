@@ -16,7 +16,7 @@
 // feature" in FORK-CHANGES.md.
 
 import { NextResponse } from "next/server";
-import { getProviderConnectionById, updateProviderConnection } from "@/lib/localDb";
+import { getProviderConnectionById, updateProviderConnection } from "@/lib/db/index.js";
 import {
   MODEL_LOCK_PREFIX,
   buildClearModelLocksUpdate,

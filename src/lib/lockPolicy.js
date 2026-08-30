@@ -101,12 +101,16 @@ const UPSTREAM_DEFAULTS = new Map(
  * The type is screened before Number() rather than after, and that ordering is the
  * guard rather than tidiness. Number() maps several non-numbers onto plausible small
  * positives — Number(true) is 1 and Number([5]) is 5 — so a value-only check would
- * honour either as a millisecond cooldown and land in exactly the case above. The
- * Settings card cannot produce one, since its input is type="number" and hands over a
- * string, but PATCH /api/settings deletes PROTECTED_SETTING_KEYS and forwards
- * everything else, so whatever a caller sends reaches the blob unexamined.
+ * honour either as a millisecond cooldown and land in exactly the case above. Nothing
+ * in this fork produces such a value: the Settings card runs every field through
+ * secondsToMs, which returns a number or null and nothing else. What makes the screen
+ * worth keeping is the route rather than the card — PATCH /api/settings deletes
+ * PROTECTED_SETTING_KEYS and forwards everything else, so whatever a caller sends
+ * reaches the blob unexamined.
  *
- * Numeric strings stay accepted: "120" is what the card itself writes.
+ * Numeric strings stay accepted for that same caller's sake, not the card's. The card
+ * writes milliseconds as a number; a hand-written PATCH sending "120000" is the only
+ * thing the string branch is here for.
  */
 function readConfiguredMs(settings, key) {
   const raw = settings?.[key];
@@ -167,7 +171,7 @@ function buildFixedCooldownMap(settings) {
  * @param {object} settings
  * @returns {number} Cooldown in milliseconds.
  */
-export function resolveBackoffCooldownMs(backoffLevel, settings) {
+function resolveBackoffCooldownMs(backoffLevel, settings) {
   const base = effectiveMs(settings, "lockBackoffBaseMs");
   const ceiling = Math.max(effectiveMs(settings, "lockBackoffMaxMs"), base);
   const step = Math.max(0, Number(backoffLevel) - 1);

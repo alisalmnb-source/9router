@@ -460,7 +460,11 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
 
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {
-    const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, customToolNames, trackDone, appendLog });
+    // FORK(logs): reqLogger added. It is not in sharedCtx — the non-streaming call below
+    // passes it explicitly for the same reason — and without it this handler wrote no
+    // stage 5 or 7, which made every successful forced-SSE-to-JSON row read as
+    // `incomplete` in the Logs tab. See handleForcedSSEToJson's docblock.
+    const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, reqLogger, customToolNames, trackDone, appendLog });
     if (result) { streamController.handleComplete(); return result; }
   }
 

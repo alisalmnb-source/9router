@@ -40,7 +40,16 @@ into it.
   check then corrected step 10, which told you to test `attempt.at` for *equality* with
   `lastRefreshAt` — two separate `Date.now()` calls that differ by 1 to 2 ms on 40% of a
   healthy install. Steps 1 to 5 and 9 to 11 all pass; 6, 7 and 8 need a deliberate
-  provider failure or a browser and were not run.
+  provider failure or a browser and were not run. A review of the whole fork diff before
+  committing then found the `logs` bug that predates every merge:
+  `handleForcedSSEToJson` never received a `reqLogger`, so on any `forceStream` provider
+  answering a non-streaming request the response was absent from disk and a successful
+  row was badged `Incomplete`. Fixed by passing it and writing both stages —
+  [The third response path](#the-third-response-path). Found by reading, not by a check;
+  nothing in the checklist can see a missing argument, and the numbers it does count all
+  passed. The same review corrected `readConfiguredMs`'s docblock in `lockPolicy.js`,
+  which claimed the Settings card writes numeric strings when `secondsToMs` makes it
+  write numbers.
 - Fork point `699edac3`, tag `v0.5.55`. No merges before this.
 
 **Merging right now?** In order:
@@ -81,7 +90,8 @@ are kept because they are the readable statement of what is being asserted, and 
   whose only record this is.
 - [Feature: logs](#feature-logs) — the unredacted request inspector.
   [The `logDir` bridge](#the-logdir-bridge--most-likely-to-conflict) is the part a merge
-  lands on. Also [Header masking](#header-masking), [Access](#access),
+  lands on. Also [The third response path](#the-third-response-path),
+  [Header masking](#header-masking), [Access](#access),
   [Tab registration](#tab-registration), [Environment](#environment) and
   [How outcome is decided](#how-outcome-is-decided).
 - [Feature: locks](#feature-locks) — configurable cooldowns and a per connection release
@@ -159,8 +169,8 @@ likely you, a year from now, with conflict markers open.
 
   **A file that belongs to no feature carries no tag, and the Added table is its only
   record.** Two do: this document and `scripts/fork-check.mjs`. The tag's job is to return
-  one feature's footprint, so tagging fork-wide tooling with all three would inflate every
-  per-feature count while telling nobody anything. Keep such files out of the tag scheme
+  one feature's footprint, so tagging fork-wide tooling with every feature tag would inflate
+  every per-feature count while telling nobody anything. Keep such files out of the tag scheme
   and in the table — and if a third appears, say so there, because nothing else will.
 - **Record what the fork depends on but does not edit.** Those files carry no tag, by
   definition, so "What upstream can break" is their only record. A dependency added
@@ -188,7 +198,7 @@ line 49, `logs/*`, is what keeps raw dumps out of version control — see the en
 ## Fork inventory
 
 Every file the fork touches, across all features. Fifteen modified, thirteen added,
-**+357 −31** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
+**+415 −32** in the modified ones, measured as `git diff upstream/master..HEAD --stat`
 over the fifteen rows of the Modified table.
 
 ```
@@ -239,11 +249,11 @@ harmless.
 
 | File | Feature | Δ | Change |
 | --- | --- | --- | --- |
-| `open-sse/handlers/chatCore.js` | logs | +5 −1 | `logDir: reqLogger.sessionPath` in `sharedCtx`, plus the two error-path `saveRequestDetail` calls that run before it exists. |
+| `open-sse/handlers/chatCore.js` | logs | +10 −2 | `logDir: reqLogger.sessionPath` in `sharedCtx`, plus the two error-path `saveRequestDetail` calls that run before it exists. Also `reqLogger` itself at the `handleForcedSSEToJson` call — that handler is the one upstream never gave it to. |
 | `open-sse/handlers/chatCore/requestDetail.js` | logs | +4 | `buildRequestDetail` passes `logDir` through. |
 | `open-sse/handlers/chatCore/streamingHandler.js` | logs | +5 −2 | `logDir` destructured in `handleStreamingResponse` and `buildOnStreamComplete`, forwarded in both record calls. |
 | `open-sse/handlers/chatCore/nonStreamingHandler.js` | logs | +3 −1 | Same, one call site. |
-| `open-sse/handlers/chatCore/sseToJsonHandler.js` | logs | +5 −2 | `logDir` added to the local `ctx`, which is spread into both record calls. |
+| `open-sse/handlers/chatCore/sseToJsonHandler.js` | logs | +58 −2 | The dump field added to the local `ctx`, which is spread into both record calls. Then `reqLogger` in the signature and five calls through it — stage 5 once per branch, stage 7 once before each of the three returns. Mostly the docblock explaining why. See [The third response path](#the-third-response-path). |
 | `open-sse/utils/requestLogger.js` | logs | +26 −18 | `maskSensitiveHeaders` enabled and applied at all four write sites. |
 | `src/lib/db/repos/requestDetailsRepo.js` | logs | +24 | Stores the dump directory *name* as `logDir`; copies `stream` to the top level of the record. |
 | `src/lib/db/repos/settingsRepo.js` | logs | +9 −1 | `enableObservability` defaults to `true`; new `requestLogsMaxSessions`. |
@@ -269,6 +279,27 @@ discovered them. Read these before designing a feature, not while merging one.
   endpoints went under `/api/logs`. Naming a fork route after the upstream resource it
   touches instead of after the fork feature is how a mutating endpoint ends up outside
   the guard while every static check still passes.
+
+- **Reach the database through `@/lib/db/index.js`, never `@/lib/localDb`.** The second is
+  a re-export shim over the first and says so in its own opening line — "kept for backward
+  compatibility with existing imports" — so a fork file routed through it inherits a
+  retirement this fork has no say in, in exchange for no behaviour at all. Both spellings
+  resolve to the same functions, which is what makes the wrong one invisible: nothing
+  fails, no check can see it, and the house convention is the shim by a wide margin, so a
+  new file drifts there by default. The exception is an upstream file the fork only edits:
+  `src/sse/services/auth.js` keeps upstream's `localDb` import, and the `getSettings()`
+  call the `locks` feature added rides on it — changing that line would fork a line for
+  nothing and would desynchronise it from the specifier
+  `tests/unit/github-monthly-usage-lock.test.js` mocks.
+
+- **Export only what another file imports.** A policy module's export list is the only
+  statement of its contract, so a name exported for nobody makes the contract unreadable
+  and invites a second caller into an internal that was never designed for one. Keep the
+  helpers file-local and say so where it is not obvious — `deriveStreamingOutcomeFromRecord`
+  in `src/lib/requestLogsFs.js` carries a "Not exported: callers should go through
+  `resolveOutcome`" line because the precedence it omits is the whole reason. Nothing
+  enforces this: lint accepts an unused export, and the count in the inventory does not
+  look at export lists. It has to be read off the importers, which is one grep per name.
 
 - **Never copy an upstream numeric constant into `DEFAULT_SETTINGS`.** Store nothing,
   and resolve an absent value to the imported constant instead. A copied number is a
@@ -338,7 +369,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 
 | Upstream file | Threatens |
 | --- | --- |
-| `open-sse/handlers/chatCore.js` and `chatCore/*` | Checklist 1 — the `logDir` thread |
+| `open-sse/handlers/chatCore.js` and `chatCore/*` | Checklist 1 — the `logDir` thread. **Also the `reqLogger` thread, which no checklist item covers:** `handleForcedSSEToJson` only writes its stages because `chatCore.js` passes `reqLogger` to it by name, and a resolution that drops that argument fails silently — see [The third response path](#the-third-response-path). |
 | `open-sse/handlers/chatCore/streamingHandler.js` | Checklist 1, and 6: this file owns the placeholder text the outcome logic compares against |
 | `open-sse/utils/requestLogger.js` | Checklist 2 (masking), 4 (session directory naming), 5 (stage filenames), 10 (the `logs/` root) |
 | `src/lib/db/repos/requestDetailsRepo.js` | Checklist 7 (`truncateField`) on the write path. Also the read path: `getRequestDetails` does `SELECT data` and parses the whole blob, which is the only reason `logDir` and `stream` arrive with no reader-side code. A projection onto named fields would drop both in silence. |
@@ -375,7 +406,7 @@ The tag grep finds these on its own. The table adds which check covers them.
 | `open-sse/services/tokenRefresh.js` and `open-sse/config/appConstants.js` | Checklists 21 and 22. `getRefreshLeadMs` is the per-provider lead, `REFRESH_LEAD_MS` is derived from `PROVIDER_OAUTH` rather than written down, and `isUnrecoverableRefreshError` is the sole source of the "re-authenticate" distinction. Upstream adding a permanent code there upgrades the fork's message with no edit; upstream removing the export is a build failure. Note the derivation is also why this module can never be imported client side — see the policy-module rule above. |
 | `open-sse/handlers/chatCore.js`'s 401 block and `open-sse/executors/base.js` | Known limitations — the refresh path `tokenstat` deliberately does not observe. `chatCore.js` calls `executor.refreshCredentials` directly, so the result never passes `mergeRefreshedCredentials` and its failure branch is a `log.warn` and nothing else. If upstream ever routes that block through `checkAndRefreshToken`, the gap closes for free — check whether it did. |
 | `src/lib/db/repos/connectionsRepo.js` | Checklist 23. `updateProviderConnection` merges `{ ...existing, ...data }` with no whitelist, which is the only reason `tokenRefreshAttempt` round-trips through the `data` blob without being declared anywhere. `OPTIONAL_FIELDS` is a whitelist in `createProviderConnection` only; extending it to the update path drops the field silently, and the status line reverts to reporting upstream's `lastRefreshAt` with no outcome — a plausible-looking display, not an error. |
-| `src/lib/db/index.js` and `src/lib/localDb.js` | How the fork routes reach the database, in **both spellings**: `logs/records/route.js` and `token-status/route.js` import from `db/index.js`, `locks/reset/route.js` from `localDb.js`. Same functions either way — `localDb.js` is a re-export shim over `src/lib/db/` — so this is one dependency written two ways, and no checklist item would surface it. `localDb.js` says "shim" in its own first line, but nearly every route under `src/app/api` imports through it, so retiring it would be a large upstream change and the fork's single import there would fail loudly. Unify toward `localDb.js` if you unify at all; it is the house convention by a wide margin. |
+| `src/lib/db/index.js` and `src/lib/localDb.js` | How the fork reaches the database. All three fork-added routes import from `db/index.js`; `auth.js` is the only fork-touched file on the `localDb.js` shim, and through upstream's own import line. Retiring or renaming an export on either side is a build failure, the good direction. The quiet direction is a new fork file drifting onto the shim, which is a rule rather than a risk — see the `@/lib/db/index.js` entry in [Rules that outlive a feature](#rules-that-outlive-a-feature). |
 | `src/app/api/providers/route.js` | Two ways. It publishes `tokenRefreshAttempt` whether the fork likes it or not, which is what makes the write-point reduction load-bearing (see the record-fields rule). And it blanks `refreshToken`, which is why eligibility cannot be decided in the browser and `/api/token-status` exists at all. Narrowing it to a whitelist would break far more than this feature; widening it to leak `refreshToken` would make the extra route pointless but harm nothing the fork owns. |
 | `src/shared/utils/index.js` | `TokenStatus.js` imports `getRelativeTime` from the barrel for past timestamps. Non-ticking and past-only by design, which is why the forward-looking half is formatted locally in that component rather than by a shared helper — there is none. |
 | `src/lib/db/backup.js` | Known limitations — `requestDetails` is excluded from backups |
@@ -486,6 +517,14 @@ path is also back on the record and back out through
 This is where the fork-wide rule on record fields came from — see
 [Rules that outlive a feature](#rules-that-outlive-a-feature).
 
+**`reqLogger` is not in `sharedCtx` and must not be put there.** It travels to each
+handler by name at the call site, which is upstream's arrangement, and the reason to keep
+it is that the two objects have different lifetimes: `sharedCtx` is built once and spread
+into whichever handler wins, while `reqLogger` is created earlier — the two error paths
+above `sharedCtx` already use `reqLogger.sessionPath` directly. Moving it in would look
+like a tidy-up and would quietly change which of the four handlers can write stages;
+[The third response path](#the-third-response-path) is what that costs.
+
 Both `logDir` and the top-level `stream` copy land in the existing `data` JSON blob:
 **no migration, no `SCHEMA_VERSION` bump.**
 
@@ -502,6 +541,52 @@ that `truncateField` returns a new value instead of mutating what it was handed.
 7 is what pins that, and it is the whole guard: if `truncateField` ever starts mutating,
 `item.request` is already a `{_truncated, …}` stub by the time this line reads it, `stream`
 lands `null` on every long conversation, and the badge disappears with no error.
+
+### The third response path
+
+`chatCore.js` picks one of three response handlers, and **upstream passes `reqLogger` to
+only two of them.** `handleForcedSSEToJson` — the path taken when the provider forces
+streaming but the client wants JSON — never received it, so every dump it produced
+stopped at `4_req_target.json`. The fork passes it now and calls through it five times:
+stage 5 once per branch, stage 7 once before each of the three returns.
+
+Left alone, the missing stages were not a cosmetic gap. Two things followed:
+
+- **The response was unreadable.** No stage 5 and no stage 7 on disk, and
+  `/api/logs/records` drops the record's payload fields server-side, so for this path
+  the panel could show the summary and the request stages and nothing else — the one
+  thing the tab exists for was absent.
+- **A successful request was badged `Incomplete`.** `deriveOutcome` reads "no
+  `7_res_client.*`" as `incomplete`, and step 2 of
+  [How outcome is decided](#how-outcome-is-decided) could not overrule it, because that
+  step is gated on `response.type === "streaming"` and this handler sets no `type`.
+  Reproduced on a `grok-cli` row carrying 133 completion tokens and a 3368 ms ttft.
+
+**Which providers reach it:** any with `forceStream: true` in its registry entry —
+`openai`, `codex`, `grok-cli`, `zed`, `codebuddy-cn`, `codebuddy-intl`, `commandcode` —
+whenever the client asks for a non-streaming reply. So the affected set is not exotic,
+which is why it went unnoticed rather than why it was rare: most clients stream, and a
+streamed request takes a different handler.
+
+**Stage 5 holds the assembled body here, not the SSE frames**, and that is a decision
+rather than a shortcut. `handleNonStreamingResponse` faces the same ambiguity — its
+`text/event-stream` branch also receives frames and returns JSON — and it parses first,
+then hands `logProviderResponse` the parsed object. Following it keeps both
+JSON-returning paths writing the same pair of `.json` stages, so the `.json`/`.txt`
+split still means "how the client was answered". It also keeps the change additive:
+`convertResponsesStreamToJson(providerResponse.body)` consumes the stream, so capturing
+frames would have meant buffering and replaying it around an upstream line. The cost is
+in this feature's own "Known limitations" below — frame-level detail stays the streaming
+path's alone. (Named rather than linked: four sections carry that heading, so its
+generated id is positional and would retarget the moment a feature is reordered.)
+
+**What a merge can do to this.** Nothing counts it: `reqLogger` is a plain parameter, and
+a resolution that drops it from either the signature or the call site leaves no error
+behind — the optional chaining on all five calls is deliberate, so the handler keeps
+working and only the stages go missing. The symptom to recognise is the one above: rows
+on a `forceStream` provider turning `Incomplete` while the record says the request
+succeeded. Post-merge step 2 sees `hasLogs: true` for these rows either way, so it does
+not catch it.
 
 ### Header masking
 
@@ -688,9 +773,15 @@ this order:
    reordering these steps: a response only grows large enough to be clipped by
    completing, whereas an aborted stream keeps the short placeholder and is still
    read here. Step 2 therefore keeps exactly the case it exists for.
-3. **The transcript tail**, which is what normally answers for a non-streaming row:
-   `7_res_client.json` exists, or a terminal marker appears in `7_res_client.txt`'s tail.
-   Neither `7_*` file present resolves to `incomplete`.
+3. **The transcript tail**, which is what normally answers for any row answered with
+   JSON: `7_res_client.json` exists, or a terminal marker appears in
+   `7_res_client.txt`'s tail. Neither `7_*` file present resolves to `incomplete`.
+
+   That last sentence is why this step depends on every response handler writing stage 7,
+   and on one of them it did not until the fork passed it a `reqLogger` —
+   [The third response path](#the-third-response-path). A handler that returns a body
+   without writing stage 7 lands every one of its successful rows here as `incomplete`,
+   and step 2 cannot save it, because step 2 answers for streams only.
 
    **The tail test is `includes`, not "ends with".** `deriveOutcome` reads the last
    `TAIL_PROBE_BYTES` and asks whether any marker appears *anywhere* in that window, so a
@@ -776,22 +867,34 @@ mechanism to reach for here.
   first 2 MB will not parse. Nothing is masked or rewritten either way, so the two
   paths agree on what they show; they differ only in whether the panel gets a JSON
   tree or a text blob.
+- **Frame-level detail is the streaming path's alone.** Stage 5 holds individual SSE
+  frames only when the client was streamed to. The two handlers that answer with JSON
+  both record the assembled body instead, so on a `forceStream` provider answering a
+  non-streaming request you get the provider's reply and its headers but not the frames
+  that carried it — no per-delta timing, no reasoning deltas, no separate usage frame.
+  `handleNonStreamingResponse` has always behaved this way; `handleForcedSSEToJson`
+  matches it deliberately, see [The third response path](#the-third-response-path).
+  Recovering the frames would mean buffering and replaying a stream upstream hands
+  straight to its converter.
 - **Outcome filtering narrows the current page only.** It is derived per row, partly
   from the filesystem, so it cannot be a SQL predicate. The UI says so under the
   control.
 - **Stage count varies per row**, from one to seven files, because a file exists only
   if that step ran: `3_req_openai.json` when the request goes through the OpenAI pivot
-  (`translator/index.js`), `5_res_provider.json` and `7_res_client.json` for
-  non-streaming against `5_res_provider.txt` and `7_res_client.txt` for streaming,
-  `6_res_openai.txt` for translated streams, `6_error.json` on failure. The panel lists
-  what is on disk rather than padding out absent stages.
+  (`translator/index.js`), `5_res_provider.json` and `7_res_client.json` when the client
+  is answered with JSON against `5_res_provider.txt` and `7_res_client.txt` when it is
+  streamed, `6_res_openai.txt` for translated streams, `6_error.json` on failure. The
+  panel lists what is on disk rather than padding out absent stages.
 
   **Seven is the ceiling and one is the floor**, and both ends are easy to get wrong.
   `STAGE_FILES` in `requestLogsFs.js` lists ten possible names, and no row gets close to
   ten, for three separate reasons:
 
-  - The `.json` and `.txt` variants of stages 5 and 7 are mutually exclusive —
-    non-streaming writes the pair of `.json` files, streaming appends the pair of `.txt`
+  - The `.json` and `.txt` variants of stages 5 and 7 are mutually exclusive, and **the
+    split is by how the client was answered, not by how the provider replied.** Two of
+    the three response handlers return JSON and write the pair of `.json` files —
+    `handleNonStreamingResponse` and `handleForcedSSEToJson`, the second of which read
+    SSE frames to get there. Only `handleStreamingResponse` appends the pair of `.txt`
     ones.
   - **`6_res_openai.txt` and `6_error.json` cannot coexist**, which is what caps the total
     at seven rather than eight. `reqLogger.logError` has exactly one call site in the whole
@@ -1960,12 +2063,35 @@ the `reset` as well as the `checkout` — and why `git status` looks clean rathe
 dirty while the base run is in progress. Confirm `src/sse/services/auth.js` actually
 reverted before trusting the base numbers; it is the file the comparison is most about.
 
-**Do not substitute a separate worktree with a junctioned `node_modules`.** It looks
-tidier and it produces a bogus baseline: every test file reports "No test suite found",
-which lands in the JSON as all-suites-failed with zero assertions, and the assertion
-diff then reads as a total regression. The size of the report is the tell — a valid run
-of this suite writes roughly 770 KB, a broken one about 65 KB. Run both halves in the
-same checkout.
+**A separate worktree works and is the safer option, but it needs `node_modules` linked in
+*two* places.** `tests/` is an independent package, so a worktree that only borrows the
+root `node_modules` leaves Vitest itself unresolvable: every test file reports "No test
+suite found", which lands in the JSON as all-suites-failed with zero assertions, and the
+assertion diff then reads as a total regression. Link both and the baseline is real:
+
+```
+git worktree add --detach /tmp/9r-base v0.5.59
+# then link BOTH, from the fork checkout:
+#   <worktree>/node_modules        →  ./node_modules
+#   <worktree>/tests/node_modules  →  ./tests/node_modules
+# Windows: New-Item -ItemType Junction -Path <link> -Target <target>
+```
+
+Verified at `v0.5.59`: 216 files, 1937 passing and 88 failing assertions across 30 files —
+the same numbers the in-place method gives, which is what makes the two mutually
+confirming. **Prefer it over the in-place `git checkout upstream/master -- <files>` above**,
+because it never writes to the fork's own working tree, so an interrupted run cannot leave
+upstream's copies sitting in a checkout that `git status` calls clean.
+
+**Check the report size either way — it is the tell that the run was real.** A valid run of
+this suite writes roughly 770 KB, a broken one about 65 KB. That applies to the in-place
+method too: a `git checkout` that silently failed produces the same empty comparison.
+
+**Removing the links afterwards is the dangerous step on Windows.** `Remove-Item -Recurse`
+on a junction prompts and, if answered, deletes through it into the real `node_modules`.
+Delete the reparse point alone — `[System.IO.Directory]::Delete($link, $false)`, or
+`cmd /c rmdir <link>` — then verify `node_modules` still has its contents before running
+`git worktree remove`.
 
 Diff the `fullName` values of failed assertions. A regression is a name failing in
 `fork.json` but not in `base.json`. Judge only by that: the totals wobble between runs

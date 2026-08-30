@@ -178,8 +178,37 @@ export function parseSSEToOpenAIResponse(rawSSE, fallbackModel) {
 /**
  * Handle case: provider forced streaming but client wants JSON.
  * Supports both Codex/Responses API SSE and standard Chat Completions SSE.
+ *
+ * FORK(logs): `reqLogger` is a fork addition to this signature. The other fork field in
+ * it is described at the `ctx` literal below, and deliberately not named here —
+ * checklist 1 greps this file for it and a second mention would inflate that count,
+ * same reason `src/dashboardGuard.js` keeps one path out of the other's comment.
+ *
+ * **Upstream gave this handler no `reqLogger`, and that was the bug.** It is the third
+ * response path — `handleStreamingResponse` and `handleNonStreamingResponse` are the
+ * other two, and both write their stages — so every dump this one produced stopped at
+ * `4_req_target.json`. Two consequences, and the second is the one that made the tab
+ * lie: the provider's answer and the body the client received were absent from disk,
+ * and `deriveOutcome` in `src/lib/requestLogsFs.js` reads "no `7_res_client.*`" as
+ * `incomplete`. `resolveOutcome`'s record signal could not overrule it either, because
+ * that signal is gated on `response.type === "streaming"` and nothing here sets it. So
+ * a request that returned a full answer was badged `Incomplete`. Reproduced on a
+ * `grok-cli` row with 133 completion tokens and a 3368 ms ttft.
+ *
+ * Reachable on any provider with `forceStream: true` — `openai`, `codex`, `grok-cli`,
+ * `zed`, `codebuddy-cn`, `codebuddy-intl`, `commandcode` — whenever the client asks for
+ * a non-streaming reply.
+ *
+ * **Stage 5 carries the assembled body, not the SSE frames**, following
+ * `handleNonStreamingResponse`: its `text/event-stream` branch parses first and hands
+ * `logProviderResponse` the parsed object too. That is upstream's own answer to "SSE
+ * arrived but JSON goes back", so both JSON-returning paths now write the same pair of
+ * `.json` stages and the frame-level view stays the streaming path's alone. It also
+ * keeps this change additive: `convertResponsesStreamToJson(providerResponse.body)`
+ * below is untouched, where capturing frames would have meant buffering and replaying
+ * the stream.
  */
-export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, customToolNames, trackDone, appendLog, logDir, reqTag, log }) {
+export async function handleForcedSSEToJson({ providerResponse, sourceFormat, targetFormat, provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, reqLogger, customToolNames, trackDone, appendLog, logDir, reqTag, log }) {
   const contentType = providerResponse.headers.get("content-type") || "";
   const isSSE = contentType.includes("text/event-stream") || (contentType === "" && isResponsesProvider(provider));
   if (!isSSE) return null; // not handled here
@@ -203,6 +232,12 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
   if (isCodexResponsesApi) {
     try {
       const jsonResponse = await convertResponsesStreamToJson(providerResponse.body);
+      // FORK(logs): stage 5 for the Responses branch. Written after the conversion
+      // rather than before, so upstream's line above keeps reading the body stream
+      // directly. Optional-chained on purpose: a raw-dump detail must never be the
+      // reason a converted response fails, and this handler's params arrive by spread,
+      // where a lost key is a silent undefined.
+      reqLogger?.logProviderResponse?.(providerResponse.status, providerResponse.statusText, providerResponse.headers, jsonResponse);
       if (onRequestSuccess) await onRequestSuccess();
 
       const usage = jsonResponse.usage || {};
@@ -228,6 +263,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
 
       // Client is Responses API → return as-is
       if (sourceFormat === FORMATS.OPENAI_RESPONSES) {
+        // FORK(logs): stage 7. One of three returns in this handler, and each gets its
+        // own line immediately above it rather than a shared wrapper — that leaves
+        // upstream's return statements byte-identical for the next merge.
+        reqLogger?.logConvertedResponse?.(jsonResponse);
         return { success: true, response: new Response(JSON.stringify(jsonResponse), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
       }
 
@@ -284,6 +323,9 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         };
       }
 
+      // FORK(logs): stage 7, second of three. Covers both the gemini-family and the
+      // chat-completions shapes assigned to finalResp above.
+      reqLogger?.logConvertedResponse?.(finalResp);
       return { success: true, response: new Response(JSON.stringify(finalResp), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
     } catch (err) {
       console.error("[ChatCore] Responses API SSE→JSON failed:", err);
@@ -302,6 +344,13 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
         parsed.error.message || "Upstream SSE stream failed"
       );
     }
+
+    // FORK(logs): stage 5 for the chat branch. Placed after the two guards above, so a
+    // stream that failed to parse writes no stage 5 — the same point at which
+    // handleNonStreamingResponse returns without logging one. `parsed` is recorded as
+    // assembled here, before the usage re-attach and the reasoning_content strip below,
+    // matching that handler's order too.
+    reqLogger?.logProviderResponse?.(providerResponse.status, providerResponse.statusText, providerResponse.headers, parsed);
 
     if (onRequestSuccess) await onRequestSuccess();
 
@@ -354,6 +403,10 @@ export async function handleForcedSSEToJson({ providerResponse, sourceFormat, ta
       ? chatCompletionToResponses(parsed, customToolNames)
       : parsed;
 
+    // FORK(logs): stage 7, last of three. `finalBody` here is the local const declared
+    // above, which shadows the parameter of the same name — upstream's shadowing, and
+    // the local is the one the client actually receives.
+    reqLogger?.logConvertedResponse?.(finalBody);
     return { success: true, response: new Response(JSON.stringify(finalBody), { headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" } }) };
   } catch (err) {
     console.error("[ChatCore] Chat Completions SSE→JSON failed:", err);
