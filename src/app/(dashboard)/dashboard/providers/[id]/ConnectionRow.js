@@ -137,14 +137,12 @@ export default function ConnectionRow({ connection, proxyPools, isOAuth, isFirst
 
   const getStatusVariant = () => getConnectionStatusVariant(connection.isActive, effectiveStatus);
 
-  // FORK(locks): the button appears only when there is something to clear. An expired
-  // lock still leaves lastError on the row until a real request succeeds, so lastError is
-  // part of the condition rather than isCooldown alone. Declared here because isCooldown
-  // is only initialised above this point.
-  //
-  // Gated on isActive for the same reason CooldownTimer and the lastError text below are:
-  // a disabled connection hides both of them, so without this gate the orange Unlock
-  // button would be the only thing on the row referring to a lock the row does not show.
+  // FORK(locks): the button appears only when there is something to clear. `lastError` is part of
+  // the condition, not `isCooldown` alone, because an expired lock still leaves the error on the row
+  // until a real request succeeds. Gated on isActive for the same reason the cooldown timer and
+  // error text are — otherwise the button would be the only thing referring to a lock the row does
+  // not show. **Upstream renaming either field costs the visibility condition**, which then either
+  // never appears or never hides.
   const hasClearableLock = (isCooldown || !!connection.lastError) && connection.isActive !== false;
 
   const getOneByOneVariant = () => {

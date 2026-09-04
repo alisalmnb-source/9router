@@ -224,6 +224,37 @@ export function resolveSessionId(opts = {}) {
     return resolveSessionIdentity(opts).sessionId;
 }
 
+/**
+ * FORK(smartrouting): the conversation identity, or null when there is not one yet. Pure
+ * addition — nothing existing in this file is touched.
+ *
+ * **Do not "simplify" this into resolveSessionIdentity above:** its last two fallbacks are keyed
+ * on the ACCOUNT, so asking it which conversation this is, in order to pick an account, answers
+ * with the account. This is its first two tiers alone.
+ *
+ * **The identity must not move mid-conversation** — which is what rules out the system prompt: an
+ * agent client switching plan mode to build mode sends different instructions, and the conversation
+ * would jump accounts, the exact thing affinity exists to prevent.
+ *
+ * Null on a first turn is correct, not a gap; the caller then selects an account and records
+ * nothing. The fixed `"affinity"` scope keeps these entries from colliding with the
+ * provider-scoped ones above.
+ *
+ * **Upstream dependency:** two file-local helpers (a rename is a build failure, safe). The silent
+ * direction is retuning the assistant-text length bounds — that changes which conversations get an
+ * identity and how stable it stays.
+ *
+ * @param {object} opts
+ * @param {object} [opts.headers] Raw client request headers, lowercase keys.
+ * @param {object} [opts.body] Parsed client request body.
+ * @returns {string|null}
+ */
+export function resolveConversationKey({ headers, body } = {}) {
+    const client = extractClientSessionId(headers, body);
+    if (client) return client;
+    return assistantTextSessionId("affinity", body);
+}
+
 export function resolveContinuationId({ sessionId, connectionId, scope = "", ephemeral = false } = {}) {
     if (ephemeral) return crypto.randomUUID();
     const key = `${scope}:${connectionId || ""}:${sessionId || ""}`;

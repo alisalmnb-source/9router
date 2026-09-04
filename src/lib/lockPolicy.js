@@ -1,33 +1,23 @@
 // FORK(locks): settings-driven lock durations.
 //
-// open-sse computes cooldowns from static constants in config/errorConfig.js, in a
-// pure synchronous function that cannot read the database. This module remaps that
-// computed duration onto a configured one inside markAccountUnavailable
-// (src/sse/services/auth.js), which every modality handler routes its failures through,
-// so nothing under open-sse/ has to change.
+// open-sse computes cooldowns from static constants in a pure function that cannot read the
+// database. This module remaps that computed duration onto a configured one inside
+// markAccountUnavailable (src/sse/services/auth.js), which every modality routes failures
+// through — so nothing under open-sse/ changes.
 //
-// One path escapes it, as of v0.5.59: an antigravity quota block. src/sse/handlers/chat.js
-// hard-codes shouldFallback and skips markAccountUnavailable entirely when
-// handleAntigravityQuotaError comes back with a resetAt, so no configured duration is
-// consulted and no modelLock_* is written. See the locks known limitations in
-// FORK-CHANGES.md.
+// Two load-bearing properties:
+//   1. The remapping keys are the IMPORTED upstream constants, never literals. Upstream
+//      retuning a value is then followed automatically.
+//   2. Anything unrecognised passes through unchanged, so a new upstream rule keeps upstream's
+//      duration rather than picking up an unrelated configured one.
 //
-// Two properties are load-bearing:
+// Accepted cost: an install that never opens the Settings card no longer behaves like upstream.
+// It locks accounts considerably longer. That is the point of the values, not a side effect.
 //
-//   1. The remapping keys are the *imported* upstream constants, never literals. If
-//      upstream retunes a value, the mapping follows it instead of silently pointing
-//      at a number that no longer exists in the rules table.
-//   2. Anything unrecognised passes through unchanged. A new upstream rule with a
-//      duration this module does not know keeps upstream's behaviour rather than
-//      picking up an unrelated configured value.
+// One path escapes this module entirely: an antigravity quota block in src/sse/handlers/chat.js
+// skips markAccountUnavailable, so no configured duration is read and no lock is written.
 //
-// A setting left unset (null, "", absent, zero, negative, non-numeric) resolves to
-// the upstream constant, so an install that never opens the Settings card behaves
-// exactly like upstream. That is also why no numeric default is copied into
-// DEFAULT_SETTINGS — see "Rules that outlive a feature" in FORK-CHANGES.md.
-//
-// Pure and dependency-free on purpose: imported by the server (auth.js) and by the
-// client (LockDurationsCard.js). errorConfig.js has no imports of its own.
+// Pure and dependency-free, because both auth.js and LockDurationsCard.js import it.
 
 import {
   BACKOFF_CONFIG,
@@ -37,44 +27,50 @@ import {
 } from "open-sse/config/errorConfig.js";
 
 /**
- * The settings keys this feature adds, their upstream counterparts, and their UI copy.
+ * Keys, their upstream counterparts, the fork's default where it has one, and UI copy.
  *
- * Single source for the resolver and the Settings card. `upstreamMs` is read from the
- * imported constant rather than written out, so the card's placeholder and the
- * resolver's fallback can never disagree with each other or with upstream.
+ * `upstreamMs` is read from the imported constant, never written out, so the reference can
+ * never disagree with upstream. `forkDefaultMs` is the fork's own number and is stored nowhere —
+ * an install with an empty card writes no settings at all.
  *
- * BACKOFF_CONFIG.maxLevel is deliberately absent. It caps the stored counter, not the
- * duration, and `lockBackoffMaxMs` already caps the duration — so it only becomes the
- * effective ceiling when lockBackoffMaxMs > lockBackoffBaseMs * 2^(maxLevel - 1).
- * Exposing it would be a control that does nothing in every other configuration.
+ * BACKOFF_CONFIG.maxLevel is deliberately absent: it caps the stored counter, not the duration,
+ * and with these defaults it would only become the effective ceiling after about 17 days.
  */
 export const LOCK_SETTING_KEYS = [
   {
     key: "lockBackoffBaseMs",
     upstreamMs: BACKOFF_CONFIG.base,
+    forkDefaultMs: 90 * 1000,
     label: "Rate limit — first step",
     hint: "First cooldown after a rate limit. Each further failure doubles it.",
   },
   {
     key: "lockBackoffMaxMs",
     upstreamMs: BACKOFF_CONFIG.max,
+    forkDefaultMs: 90 * 60 * 1000,
     label: "Rate limit — ceiling",
     hint: "The doubling stops here. Raised to the first step if set below it.",
   },
   {
     key: "lockAuthCooldownMs",
     upstreamMs: COOLDOWN_MS.unauthorized,
+    // 5m against upstream's 2m. Costs one upstream test, which pins a 402 lock at exactly +2
+    // minutes by reading upstream's constant through this fallback. Expected to fail.
+    forkDefaultMs: 5 * 60 * 1000,
     label: "Auth and access errors",
     hint: "401, 402, 403, 404, and the \"no credentials\" / \"improperly formed request\" messages.",
   },
   {
     key: "lockShortCooldownMs",
     upstreamMs: COOLDOWN_MS.requestNotAllowed,
+    forkDefaultMs: 30 * 1000,
     label: "Request not allowed",
-    hint: "The one rule upstream treats as near-instantly retryable.",
+    hint: "The one rule upstream treats as near-instantly retryable. Levelled with transient errors here.",
   },
   {
     key: "lockTransientCooldownMs",
+    // No forkDefaultMs on purpose: the wanted value is 30s, which is already upstream's, so
+    // writing it here would duplicate an upstream constant and stop following a retune.
     upstreamMs: TRANSIENT_COOLDOWN_MS,
     label: "Transient and unknown errors",
     hint: "Everything the rules table does not match: 500, 502, 503, 504, network failures. Fires most often.",
@@ -82,52 +78,53 @@ export const LOCK_SETTING_KEYS = [
   {
     key: "lockProviderResetCapMs",
     upstreamMs: MAX_RATE_LIMIT_COOLDOWN_MS,
+    forkDefaultMs: 90 * 60 * 1000,
     label: "Provider-reported reset cap",
     hint: "Ceiling on a reset time the provider sends itself. Not a duration — lowering it shortens those locks, raising it only stops the clamping.",
   },
 ];
 
-const UPSTREAM_DEFAULTS = new Map(
-  LOCK_SETTING_KEYS.map(({ key, upstreamMs }) => [key, upstreamMs])
+/**
+ * What an unset field resolves to. Derived rather than written twice, so the card's placeholder
+ * cannot disagree with the resolver's fallback.
+ */
+export function defaultLockMs({ forkDefaultMs, upstreamMs }) {
+  return Number.isFinite(forkDefaultMs) ? forkDefaultMs : upstreamMs;
+}
+
+const EFFECTIVE_DEFAULTS = new Map(
+  LOCK_SETTING_KEYS.map((entry) => [entry.key, defaultLockMs(entry)])
 );
 
 /**
  * A configured duration, or null when unset.
  *
- * Zero and negatives are rejected rather than honoured: a zero cooldown would write a
- * lock that has already expired, which reads as "no lock at all" and would quietly
- * turn off the backoff the rest of this feature exists to lengthen.
- *
- * Only a real number is accepted, and the type is tested rather than left to Number() to
- * reject. That is the guard rather than tidiness: Number() maps several non-numbers onto
- * plausible small positives — Number(true) is 1, Number([5]) is 5, Number("5") is 5 — and
- * any of them would be honoured as a millisecond cooldown and land in exactly the case
- * above. The Settings card cannot produce one, since it runs every field through
- * secondsToMs, which returns a number or null and nothing else. PATCH /api/settings can:
- * it deletes PROTECTED_SETTING_KEYS and forwards everything else, so whatever a caller
- * sends reaches the blob unexamined. Anything that is not a number resolves to the
- * upstream constant, which is what an unset field does too.
+ * The type is tested rather than left to Number() to reject: Number() maps non-numbers onto
+ * plausible small positives (Number(true) is 1) and PATCH /api/settings forwards whatever a
+ * caller sends. A 1 ms cooldown writes a lock that has already expired, which reads as no lock
+ * at all — the backoff this feature exists to lengthen, switched off silently.
  */
 function readConfiguredMs(settings, key) {
   const raw = settings?.[key];
   return typeof raw === "number" && Number.isFinite(raw) && raw > 0 ? raw : null;
 }
 
-/** Configured value for `key`, falling back to the upstream constant. */
+/** Configured value for `key`, falling back to that key's default. */
 function effectiveMs(settings, key) {
   const configured = readConfiguredMs(settings, key);
-  return configured === null ? UPSTREAM_DEFAULTS.get(key) : configured;
+  return configured === null ? EFFECTIVE_DEFAULTS.get(key) : configured;
 }
 
 /**
  * Upstream fixed duration → configured duration.
  *
- * Values that collide are dropped rather than mapped. Today the three constants hold
- * three different numbers, but if upstream ever makes two of them equal, one category
- * would otherwise silently take the other's configured value. Dropping the ambiguous
- * entry means both fall through to upstream's own duration instead — wrong in a way
- * that matches upstream rather than wrong in a way nobody asked for. Checklist item
- * 11 in FORK-CHANGES.md is what notices the collision.
+ * Colliding keys are dropped rather than mapped: if upstream ever makes two of these constants
+ * equal, one category would otherwise silently take the other's configured value. Dropping the
+ * entry sends both to upstream's own duration instead.
+ *
+ * The collision test is on the KEYS, which are upstream's durations. Two *resolved* values being
+ * equal is fine and is the shipped state — lockShortCooldownMs and lockTransientCooldownMs both
+ * default to 30s while their upstream keys are 5s and 30s.
  */
 function buildFixedCooldownMap(settings) {
   const pairs = [
@@ -151,15 +148,10 @@ function buildFixedCooldownMap(settings) {
 }
 
 /**
- * Configured exponential backoff duration for a level.
+ * Configured exponential backoff for a level.
  *
- * Mirrors getQuotaCooldown in open-sse/services/accountFallback.js, including its
- * `level - 1` offset — upstream stores the level, so the two formulas have to agree on
- * what a stored level means. Checklist item 13 pins that.
- *
- * The ceiling is raised to the first step when it is set below it: a first step larger
- * than the ceiling is incoherent, and silently clipping it would make a large base
- * value look like it had no effect.
+ * Mirrors getQuotaCooldown in open-sse/services/accountFallback.js including its `level - 1`
+ * offset — upstream stores the level, so both formulas must agree on what a stored level means.
  *
  * @param {number} backoffLevel - The level upstream just computed (always >= 1).
  * @param {object} settings
@@ -172,24 +164,18 @@ function resolveBackoffCooldownMs(backoffLevel, settings) {
   return Math.min(base * Math.pow(2, step), ceiling);
 }
 
-/**
- * Ceiling for a reset time the provider reported itself.
- *
- * Replaces MAX_RATE_LIMIT_COOLDOWN_MS at its only call site. In practice only
- * executors/codex.js feeds that path.
- */
+/** Ceiling for a provider-reported reset. Replaces MAX_RATE_LIMIT_COOLDOWN_MS at its one call site. */
 export function resolveProviderResetCapMs(settings) {
   return effectiveMs(settings, "lockProviderResetCapMs");
 }
 
 /**
- * Remap a duration that checkFallbackError just computed onto the configured one.
+ * Remap a duration checkFallbackError just computed onto the configured one.
  *
- * Only ever call this with checkFallbackError's return value. The `newBackoffLevel`
- * field is how a ladder duration is told apart from a fixed one, and upstream sets it
- * exclusively on backoff rules — the other two branches in markAccountUnavailable
- * also assign that name, which is why they are resolved separately and never routed
- * through here.
+ * Only ever call this with checkFallbackError's return value. `newBackoffLevel` is how a ladder
+ * duration is told apart from a fixed one, and upstream sets it exclusively on backoff rules —
+ * the other two branches in markAccountUnavailable assign that same field name, which is why
+ * they are resolved separately and never routed through here.
  *
  * @param {{ cooldownMs: number, newBackoffLevel?: number }} classified
  * @param {object} settings

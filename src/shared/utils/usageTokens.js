@@ -1,25 +1,19 @@
-// FORK(logs): the token arithmetic the Usage tabs share.
+// FORK(logs): the token arithmetic both request-detail views share.
 //
-// Extracted rather than copied, and the reason is that the two tabs render the same
-// `requestDetails` rows: RequestDetailsTab reads them through
-// /api/usage/request-details and LogsTab through /api/logs/records, so a rule that
-// differed between them would show two input-token counts for one request. Duplication
-// could not be made to guarantee that — nothing greps for a semantic drift between two
-// copies, and the numbers stay plausible on both sides while disagreeing — so the copies
-// were replaced with this one definition.
+// Extracted, not copied: these three were local to RequestDetailsTab.js and duplicated in the
+// fork's request log, which renders the same rows — a drift showed two input counts for one
+// request and no grep could see it. This extraction is the only reason RequestDetailsTab.js is
+// a fork-modified file at all.
 //
-// Pure, no imports, no framework: both callers are client components, and this file is
-// also cheap enough for a server route to reach for if one ever needs the same numbers.
+// Merge note: upstream re-adding its own local copies alongside the import is a SyntaxError, so
+// most bad resolutions fail the build. The one that does not is deleting the import and keeping
+// upstream's copies — that builds, and reopens the drift.
 //
-// The cost to know at merge time: this is why `RequestDetailsTab.js` is in the fork's
-// Modified table. Upstream re-adding its own local copies of these three functions is a
-// conflict that resolves by deleting them again, not by keeping both.
+// Pure, no imports, safe on client and server.
 
 /**
- * Cache-read tokens, under either vendor's spelling.
- *
- * OpenAI reports `cached_tokens`; Anthropic reports `cache_read_input_tokens`. A row
- * carries one or the other, never both, so the `||` is a choice rather than a sum.
+ * Cache-read tokens, under either vendor's spelling. A row carries one or the other, never
+ * both, so the `||` is a choice rather than a sum.
  *
  * @param {object|null|undefined} tokens
  * @returns {number}
@@ -29,10 +23,8 @@ export function getCachedTokens(tokens) {
 }
 
 /**
- * Tokens written into the cache on this request, which only Anthropic reports.
- *
- * Separate from the read count because they are billed differently and a row can carry
- * both.
+ * Tokens written into the cache on this request. Separate from the read count because they are
+ * billed differently and a row can carry both.
  *
  * @param {object|null|undefined} tokens
  * @returns {number}
@@ -42,11 +34,9 @@ export function getCacheCreationTokens(tokens) {
 }
 
 /**
- * Input tokens for a row, cache-inclusive.
- *
- * Canonical storage keeps `prompt_tokens` cache-inclusive. Legacy Claude rows may have
- * stored it cache-exclusive, so a prompt count below the cache count is read as one of
- * those and the larger value wins — otherwise those rows under-report input.
+ * Input tokens for a row, cache-inclusive. Legacy rows may have stored the prompt count
+ * cache-exclusive, so a prompt below the cache count is read as one of those and the larger
+ * value wins — otherwise those rows under-report input.
  *
  * @param {object|null|undefined} tokens
  * @returns {number}

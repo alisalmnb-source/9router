@@ -5,7 +5,9 @@ import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import { getProviderIconSrc, markProviderIconMissing } from "@/shared/utils/providerIcon";
-import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Toggle, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
+// FORK(smartrouting): Toggle dropped from this import — the Round Robin switch it served was
+// replaced by the strategy Select below, and nothing else on this page uses it.
+import { Card, Button, Badge, Input, Modal, CardSkeleton, OAuthModal, KiroOAuthWrapper, CursorAuthModal, IFlowCookieModal, GitLabAuthModal, Select, EditConnectionModal, NoAuthProxyCard, ConfirmModal } from "@/shared/components";
 import { OAUTH_PROVIDERS, APIKEY_PROVIDERS, FREE_PROVIDERS, FREE_TIER_PROVIDERS, WEB_COOKIE_PROVIDERS, getProviderAlias, isOpenAICompatibleProvider, isAnthropicCompatibleProvider, AI_PROVIDERS } from "@/shared/constants/providers";
 import { getModelsByProviderId, getModelKind } from "@/shared/constants/models";
 import { getThinkingLevels } from "open-sse/providers/thinkingLevels.js";
@@ -17,6 +19,8 @@ import { getProviderCustomModelRows } from "@/shared/utils/providerCustomModels"
 // FORK(conntest): shared wrapper around POST /api/providers/<id>/test — adds the
 // timeout that route has no server-side equivalent for.
 import { runConnectionTest } from "@/shared/utils/connectionTest";
+// FORK(smartrouting): the same option list the global control uses, plus the inherit entry.
+import { ROUTING_STRATEGY, INHERIT_STRATEGY, PROVIDER_STRATEGY_OPTIONS } from "@/lib/routingStrategy";
 import ModelRow from "./ModelRow";
 import PassthroughModelsSection from "./PassthroughModelsSection";
 import CompatibleModelsSection from "./CompatibleModelsSection";
@@ -391,7 +395,7 @@ export default function ProviderDetailPage() {
       // Build override: null strategy means remove override, use global
       const override = {};
       if (strategy) override.fallbackStrategy = strategy;
-      if (strategy === "round-robin" && stickyLimit !== "") {
+      if (strategy === ROUTING_STRATEGY.ROUND_ROBIN && stickyLimit !== "") {
         override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
       }
 
@@ -412,17 +416,20 @@ export default function ProviderDetailPage() {
     }
   };
 
-  const handleRoundRobinToggle = (enabled) => {
-    const strategy = enabled ? "round-robin" : null;
-    const sticky = enabled ? (providerStickyLimit || "1") : providerStickyLimit;
-    if (enabled && !providerStickyLimit) setProviderStickyLimit("1");
+  // FORK(smartrouting): was handleRoundRobinToggle, a boolean. Now one handler for the
+  // four-way list. The empty value is "inherit", which stores no override at all, so the
+  // global setting stays in charge — the existing precedence is untouched.
+  const handleStrategyChange = (next) => {
+    const strategy = next === INHERIT_STRATEGY ? null : next;
+    const sticky = strategy === ROUTING_STRATEGY.ROUND_ROBIN ? (providerStickyLimit || "1") : providerStickyLimit;
+    if (strategy === ROUTING_STRATEGY.ROUND_ROBIN && !providerStickyLimit) setProviderStickyLimit("1");
     setProviderStrategy(strategy);
     saveProviderStrategy(strategy, sticky);
   };
 
   const handleStickyLimitChange = (value) => {
     setProviderStickyLimit(value);
-    saveProviderStrategy("round-robin", value);
+    saveProviderStrategy(ROUTING_STRATEGY.ROUND_ROBIN, value);
   };
 
   const saveThinkingConfig = async (mode) => {
@@ -723,26 +730,15 @@ export default function ProviderDetailPage() {
     setOneByOneStopping(true);
   };
 
-  // FORK(conntest): per-row test. Writes into oneByOneResults so the badge beside the
-  // connection name renders the outcome with no second display path.
+  // FORK(conntest): per-row test. Writes into oneByOneResults so the existing badge renders the
+  // outcome with no second display path — which makes that object's shape a contract between
+  // upstream's batch run and this. handleRunOneByOneTest above is deliberately left alone.
   //
-  // Deliberately does not reuse or refactor handleRunOneByOneTest above. Routing that
-  // loop through runConnectionTest would remove upstream's duplicate fetch, but it would
-  // also put a function this fork rewrote onto the merge-conflict surface for no visible
-  // gain. The duplication that remains is upstream's, and upstream maintains it.
-  //
-  // The refetch is NOT optional, and the badge is not what needs it. POST
-  // /api/providers/<id>/test writes four things this row already displays from
-  // `connections`: testUtils.js sets testStatus, lastError and lastErrorAt, and the
-  // refreshProviderCredentials call inside it stamps lastRefreshAt. Without the refetch
-  // the status badge, the red lastError text, the Unlock button's visibility and the
-  // whole TokenStatus line all keep pre-test state until something else reloads the list.
-  // The token line is the one that misleads: a connection with a failed refresh shows a
-  // green success badge beside a red "re-authentication needed" that the test just
-  // invalidated — the exact staleness isSupersededByLastRefresh
-  // (src/sse/services/tokenRefreshStatus.js) resolves server side and nothing was asking
-  // the server about. Upstream's one-by-one loop does not refetch either; that is
-  // upstream's to keep, not a precedent to copy.
+  // **The refetch is not optional, and the badge is not what needs it.** The test route writes four
+  // things this row displays: testStatus, lastError, lastErrorAt, and lastRefreshAt from the refresh
+  // it performs. Without the refetch the badge, the red error text, the Unlock button's visibility
+  // and the whole token line keep pre-test state. The token line is the one that misleads — a green
+  // badge beside a red "re-authentication needed" the test just invalidated.
   const handleTestConnection = async (connectionId) => {
     setOneByOneResults((prev) => ({
       ...prev,
@@ -758,18 +754,14 @@ export default function ProviderDetailPage() {
     await fetchConnections();
   };
 
-  // FORK(locks): /api/locks/reset is in LOCAL_ONLY_PATHS, so this answers on loopback
-  // only — with the dashboard open over a tunnel or Tailscale it returns 403. Refetch
-  // rather than patch local state: the route also resets testStatus, lastError, errorCode
+  // FORK(locks): the reset route is loopback-only, so over a tunnel or Tailscale this returns 403.
+  // Refetch rather than patch local state — the route also resets testStatus, lastError, errorCode
   // and backoffLevel.
   //
-  // The failure has to be reported, and that is not a style choice here. Nothing else on
-  // the row changes when this fails, so a swallowed error leaves the button looking inert
-  // and gives no way to tell "already unlocked" from "the guard refused you" — and the
-  // 403 above is a routine case, not an edge one. alert() is how every other failed
-  // mutation on this page reports itself. The body is parsed defensively because both
-  // senders answer with JSON but neither is guaranteed to: the guard returns
-  // { error: "Local only: CLI token required" } and the route its own { error }.
+  // **The failure must be reported.** Nothing else on the row moves when this fails, so a swallowed
+  // error leaves the button looking inert and gives no way to tell "already unlocked" from "the
+  // guard refused you" — and that 403 is a routine case, not an edge one. Two different senders can
+  // produce the error body, which is why it is parsed defensively.
   const handleResetConnectionLock = async (connectionId) => {
     try {
       const res = await fetch("/api/locks/reset", {
@@ -1557,14 +1549,23 @@ export default function ProviderDetailPage() {
                   )}
                 </>
               )}
-              {/* Round Robin toggle */}
+              {/*
+                FORK(smartrouting): was a Round Robin toggle. Smart Routing has to be offered
+                here as well as globally, not only globally: this override beats the global
+                setting, so a provider that already has one would silently ignore a global
+                switch to Smart Routing — the user would make the change, see nothing happen on
+                that provider, and have no way to tell why.
+              */}
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-xs text-text-muted font-medium">Round Robin</span>
-                <Toggle
-                  checked={providerStrategy === "round-robin"}
-                  onChange={handleRoundRobinToggle}
+                <span className="text-xs text-text-muted font-medium">Strategy</span>
+                <Select
+                  options={PROVIDER_STRATEGY_OPTIONS}
+                  value={providerStrategy || INHERIT_STRATEGY}
+                  onChange={(e) => handleStrategyChange(e.target.value)}
+                  className="w-40"
+                  selectClassName="py-1.5 text-xs"
                 />
-                {providerStrategy === "round-robin" && (
+                {providerStrategy === ROUTING_STRATEGY.ROUND_ROBIN && (
                   <div className="flex items-center gap-1.5">
                     <span className="text-xs text-text-muted">Sticky:</span>
                     <input

@@ -2,19 +2,19 @@
 
 // FORK(locks): the only UI for the lock durations resolved in src/lib/lockPolicy.js.
 //
-// Self-contained on purpose — it reads and writes /api/settings itself, so wiring it
-// into the Settings page costs one import and one render line in an upstream file that
-// is otherwise a magnet for conflicts. Same pattern as ConnectionsCard.
+// **Self-contained on purpose** — it reads and writes /api/settings itself, so wiring it into the
+// Settings page costs one import and one render line in an upstream file that is a conflict magnet.
+// Fields render from LOCK_SETTING_KEYS, so a new duration needs no edit here.
 //
-// Fields are rendered from LOCK_SETTING_KEYS rather than written out here, so a new
-// duration is one entry in lockPolicy.js and no change in this file.
+// Inputs are seconds, storage is milliseconds; the conversion lives in lockPolicy.js so the
+// resolver and this card cannot drift on the unit.
 //
-// Inputs are seconds, storage is milliseconds. The conversion lives in lockPolicy.js
-// so the resolver and this card cannot drift on the unit.
+// **Placeholders show the value an empty field actually produces**, not upstream's number — a
+// control that misreports its own reset state is worse than one with no placeholder.
 
 import { useEffect, useState } from "react";
 import { Button, Card, Input } from "@/shared/components";
-import { LOCK_SETTING_KEYS, msToSeconds, secondsToMs } from "@/lib/lockPolicy";
+import { LOCK_SETTING_KEYS, defaultLockMs, msToSeconds, secondsToMs } from "@/lib/lockPolicy";
 
 /**
  * Settings blob (ms) → the input values (seconds as strings, "" when unset).
@@ -62,7 +62,7 @@ export default function LockDurationsCard() {
     setStatus({ type: "", message: "" });
   };
 
-  // An empty field writes null, which the resolver reads as "use upstream's constant".
+  // An empty field writes null, which the resolver reads as "use this key's default".
   // That is what makes "clear the field" the reset-to-default gesture.
   const handleSave = async () => {
     setSaving(true);
@@ -97,33 +97,53 @@ export default function LockDurationsCard() {
           <h3 className="text-base sm:text-lg font-semibold">Account Lock Durations</h3>
           <p className="text-xs sm:text-sm text-text-muted">
             How long a connection is held back after a provider error. Seconds. Leave a
-            field empty to use the built-in value.
+            field empty to use the default shown in it.
           </p>
         </div>
       </div>
 
       <div className="flex flex-col gap-4">
-        {LOCK_SETTING_KEYS.map(({ key, label, hint, upstreamMs }) => (
-          <div
-            key={key}
-            className="flex items-start justify-between gap-4 border-t border-border/50 pt-4 first:border-t-0 first:pt-0"
-          >
-            <div className="flex-1 min-w-0">
-              <p className="font-medium text-sm sm:text-base">{label}</p>
-              <p className="text-xs sm:text-sm text-text-muted">{hint}</p>
+        {/*
+          The placeholder is the key's DEFAULT, not upstream's constant — it has to be the
+          value an empty field actually produces, or the control lies about its own reset
+          state. Where the fork's default differs, upstream's number is named underneath
+          instead of being dropped: it is the reference point for judging the change, and it
+          is the only place in the UI that still records what this install would have done
+          without the fork.
+        */}
+        {LOCK_SETTING_KEYS.map((entry) => {
+          const { key, label, hint, upstreamMs } = entry;
+          const defaultMs = defaultLockMs(entry);
+          const upstreamSeconds = msToSeconds(upstreamMs);
+          const differs = defaultMs !== upstreamMs;
+
+          return (
+            <div
+              key={key}
+              className="flex items-start justify-between gap-4 border-t border-border/50 pt-4 first:border-t-0 first:pt-0"
+            >
+              <div className="flex-1 min-w-0">
+                <p className="font-medium text-sm sm:text-base">{label}</p>
+                <p className="text-xs sm:text-sm text-text-muted">{hint}</p>
+                {differs && (
+                  <p className="text-xs text-text-muted/70 mt-0.5">
+                    Upstream default: {upstreamSeconds}s
+                  </p>
+                )}
+              </div>
+              <Input
+                type="number"
+                min="1"
+                value={values[key] ?? ""}
+                placeholder={String(msToSeconds(defaultMs) ?? "")}
+                onChange={(e) => handleChange(key, e.target.value)}
+                disabled={loading || saving}
+                className="w-20 sm:w-24 shrink-0"
+                inputClassName="text-center"
+              />
             </div>
-            <Input
-              type="number"
-              min="1"
-              value={values[key] ?? ""}
-              placeholder={String(msToSeconds(upstreamMs) ?? "")}
-              onChange={(e) => handleChange(key, e.target.value)}
-              disabled={loading || saving}
-              className="w-20 sm:w-24 shrink-0"
-              inputClassName="text-center"
-            />
-          </div>
-        ))}
+          );
+        })}
 
         <div className="flex flex-wrap items-center gap-3 border-t border-border/50 pt-4">
           <Button onClick={handleSave} disabled={loading} loading={saving}>

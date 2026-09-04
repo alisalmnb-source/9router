@@ -6,25 +6,19 @@ import { getRelativeTime } from "@/shared/utils";
 /**
  * FORK(tokenstat): one line inside a connection row saying what the token is doing.
  *
- * Display only. Every value arrives resolved from GET /api/token-status — eligibility,
- * the last observed attempt, whether the failure was permanent, and the next due time
- * are all decided in src/sse/services/tokenRefreshStatus.js. Nothing is computed here
- * except how to phrase it, because the inputs the decisions need (the per-provider
- * refresh lead, the presence of a refresh token) are not available in the browser.
+ * **Display only** — every value arrives already resolved from the status route, because the inputs
+ * the decisions need (the per-provider refresh lead, the presence of a refresh token) are not
+ * available in the browser. Nothing here computes anything but phrasing.
  *
- * Renders null unless the connection is eligible, so API-key and cookie rows are
- * untouched and a healthy list gains no extra line where there is no token to refresh.
+ * Renders null unless the connection is eligible, so API-key and cookie rows gain no line.
  *
- * **No ticking.** The background sweep runs on a fixed interval, so the refresh happens
- * on the first tick after the due moment rather than at it. A per-second countdown would
- * be claiming a precision the scheduler does not have, and would add a second interval
- * per row on top of CooldownTimer's. The neighbouring CooldownTimer is not reused for
- * the same reason plus one more: its orange clock reads as a cooldown, which is a
- * different thing from a scheduled refresh.
+ * **No ticking, deliberately.** The sweep runs on a fixed interval, so the refresh happens on the
+ * first tick after the due moment; a per-second countdown would claim a precision the scheduler
+ * does not have. The neighbouring CooldownTimer is not reused for that reason and one more: an
+ * orange clock reads as a cooldown, which is a different thing.
  *
- * Date.now() during render is safe in this one place: `status` only exists after the
- * page's client-side fetch resolves, so there is no server-rendered pass for the value
- * to disagree with.
+ * Date.now() in render is safe here only because `status` exists after a client-side fetch, so
+ * there is no server-rendered pass to disagree with.
  */
 
 /** Coarse forward-looking counterpart to getRelativeTime, sharing its m/h/d vocabulary

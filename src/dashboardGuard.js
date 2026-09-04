@@ -84,34 +84,20 @@ const LOCAL_ONLY_PATHS = [
   "/api/headroom/start",
   "/api/headroom/stop",
   "/api/headroom/proxy",
-  // FORK(logs): /api/logs serves unredacted prompts, responses and raw upstream
-  // payloads. Deny-by-default below is not enough on its own, because
-  // isAuthenticated() passes anyone through when requireLogin is false — the
-  // exact hole upstream cited when it blanked /api/usage/request-details. Local
-  // only also keeps the Cloudflare tunnel and Tailscale hosts out. Drop this
-  // entry if you ever need to read logs from a remote browser.
+  // FORK(logs): /api/logs serves unredacted prompts, responses and raw upstream payloads.
+  // Deny-by-default is not enough on its own — isAuthenticated() passes anyone through when
+  // requireLogin is false, the exact hole upstream cited when it blanked its own request-details
+  // route. Also keeps tunnel and Tailscale hosts out. Drop this entry to read logs remotely.
   "/api/logs",
-  // FORK(locks): /api/locks clears a connection's cooldowns, so a caller who can reach it
-  // repeatedly can drive a provider through this install's credentials with no backoff.
-  // Deny-by-default does not cover it while requireLogin is false, same as the entry above.
+  // FORK(locks): /api/locks releases a connection's cooldowns, so repeated calls could drive a
+  // provider through this install's credentials with no backoff.
   //
-  // Be honest about what this does and does not buy, because the fork's own reach is
-  // asymmetric here: /api/settings is not on this list, and a caller who can PATCH it can
-  // set the six lock durations to a second each and neuter the backoff that way instead.
-  // So this entry is not what stands between an attacker and the cooldowns. What it does
-  // cover is the part the settings route cannot reach — releasing locks that already
-  // exist, immediately and leaving no configuration trace behind.
+  // **What this does not buy:** /api/settings is deliberately NOT on this list, so a caller who can
+  // PATCH it can set the lock durations to a second each and neuter the backoff anyway. Adding it
+  // would lock a large upstream surface to loopback. What this entry does cover is the part the
+  // settings route cannot reach — releasing existing locks, immediately and with no trace.
   //
-  // /api/settings was deliberately left off: adding it would lock a large upstream surface
-  // to loopback and change upstream behaviour far beyond this feature. Note the exposure
-  // is upstream's and predates the fork — with requireLogin off, PUT /api/providers/<id>
-  // already lets a LAN caller swap an API key or delete a connection.
-  //
-  // Consequence to know: with the dashboard open over Tailscale or a tunnel, the reset
-  // button returns 403.
-  //
-  // Deliberately not naming the other feature's path here — checklist 3 greps for it and
-  // a mention in this comment would inflate that count.
+  // Consequence: over a tunnel or Tailscale, the Unlock button returns 403.
   "/api/locks",
 ];
 

@@ -18,6 +18,32 @@ import { translate } from "@/i18n/runtime";
 const getPageInfo = (pathname) => {
   if (!pathname) return { title: "", description: "", breadcrumbs: [] };
 
+  // FORK(smartlogs): first in the chain, deliberately. Everything below matches with
+  // `pathname.includes(...)`, so a provider id sitting in /dashboard/smart-logs/<id> could be
+  // caught by a later branch and given the wrong title — an id containing "endpoint" or
+  // "quota" would be enough. Matching this prefix before any of them removes the whole class
+  // of problem rather than relying on today's provider ids not colliding.
+  const smartLogsDetailMatch = pathname.match(/\/smart-logs\/([^/]+)$/);
+  if (smartLogsDetailMatch) {
+    const providerId = smartLogsDetailMatch[1];
+    const provider = AI_PROVIDERS[providerId];
+    return {
+      title: provider?.name || providerId,
+      description: "Smart Routing order and per-account health for this provider",
+      breadcrumbs: [
+        { label: "Smart Logs", href: "/dashboard/smart-logs" },
+        { label: provider?.name || providerId, image: getProviderIconSrc(providerId) },
+      ],
+    };
+  }
+  if (pathname.includes("/smart-logs"))
+    return {
+      title: "Smart Logs",
+      description: "Live conversations, request history, and why Smart Routing ordered accounts the way it did",
+      icon: "insights",
+      breadcrumbs: [],
+    };
+
   // Media provider detail: /dashboard/media-providers/[kind]/[id]
   const mediaDetailMatch = pathname.match(/\/media-providers\/([^/]+)\/([^/]+)$/);
   if (mediaDetailMatch) {

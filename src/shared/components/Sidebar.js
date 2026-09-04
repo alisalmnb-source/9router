@@ -23,6 +23,9 @@ const navItems = [
   // { href: "/dashboard/basic-chat", label: "Basic Chat", icon: "chat" }, // Hidden
   { href: "/dashboard/combos", label: "Combo & Vision Adapter", icon: "layers" },
   { href: "/dashboard/usage", label: "Usage", icon: "bar_chart" },
+  // FORK(smartlogs): next to Usage because it replaces a tab that used to live there.
+  // isActive() uses startsWith, so this entry also stays lit on /dashboard/smart-logs/<id>.
+  { href: "/dashboard/smart-logs", label: "Smart Logs", icon: "insights" },
   { href: "/dashboard/quota", label: "Quota Tracker", icon: "data_usage" },
   { href: "/dashboard/token-saver", label: "Token Saver", icon: "savings" },
   // { href: "/dashboard/pxpipe", label: "PXPIPE", icon: "image" },

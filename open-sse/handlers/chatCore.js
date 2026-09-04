@@ -58,7 +58,11 @@ export function stripContinuityFields(body) {
   return body;
 }
 
-export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
+// FORK(smartlogs): `sessionTag` added — an already-reduced fingerprint produced by
+// src/sse/handlers/chat.js. **This engine never computes or interprets it**, only forwards it, the
+// same as logDir; that is what keeps the raw client session id out of open-sse. Undefined for
+// every caller with no conversation concept, which is all of them but chat.
+export async function handleChatCore({ body, modelInfo, credentials, log, onCredentialsRefreshed, onRequestSuccess, onDisconnect, clientRawRequest, connectionId, sessionTag, userAgent, apiKey, ccFilterNaming, rtkEnabled, headroomEnabled, headroomUrl, headroomCompressUserMessages, headroomTimeoutMs, cavemanEnabled, cavemanLevel, ponytailEnabled, ponytailLevel, pxpipeEnabled, pxpipeMinChars, pxpipeTimeoutMs, pxpipeTransform, onPxpipeEvent, sourceFormatOverride, providerThinking }) {
   const { provider, model } = modelInfo;
   const requestStartTime = Date.now();
   // Stable per-session color so all lines of one CLI conversation share a tag
@@ -375,6 +379,9 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       response: { error: error.message || String(error), status: error.name === "AbortError" ? 499 : 502, thinking: null },
       pxpipe: pxpipeSummary,
       logDir: reqLogger.sessionPath,
+      // FORK(smartlogs): this call does not go through sharedCtx, so the field is repeated
+      // here. A transport failure still belongs to its conversation.
+      sessionTag,
       status: "error"
     })).catch(() => { });
 
@@ -429,7 +436,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
   // Provider returned error
   if (!providerResponse.ok) {
     trackPendingRequest(model, provider, connectionId, false, true);
-    const { statusCode, message, resetsAtMs } = await parseUpstreamError(providerResponse, executor);
+    // FORK(smartrouting): errorSignals threaded to the return below — see createErrorResult.
+    const { statusCode, message, resetsAtMs, errorSignals } = await parseUpstreamError(providerResponse, executor);
     appendRequestLog({ model, provider, connectionId, status: `FAILED ${statusCode}` }).catch(() => { });
     saveRequestDetail(buildRequestDetail({
       provider, model, connectionId,
@@ -440,6 +448,8 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       response: { error: message, status: statusCode, thinking: null },
       pxpipe: pxpipeSummary,
       logDir: reqLogger.sessionPath,
+      // FORK(smartlogs): same as the transport-error call above — outside sharedCtx.
+      sessionTag,
       status: "error"
     })).catch(() => { });
 
@@ -449,21 +459,20 @@ export async function handleChatCore({ body, modelInfo, credentials, log, onCred
       log.errorLine(reqTag, "✗", `ERROR ${statusCode} · ${provider}/${model} · ${Date.now() - requestStartTime}ms${urlStr}\n    ${errMsg}`);
     }
     reqLogger.logError(new Error(message), finalBody || translatedBody);
-    return createErrorResult(statusCode, errMsg, resetsAtMs);
+    return createErrorResult(statusCode, errMsg, resetsAtMs, errorSignals);
   }
 
-  // FORK(logs): logDir rides along in sharedCtx, which every downstream handler
-  // receives via spread, so one field reaches all four of them.
-  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, logDir: reqLogger.sessionPath, reqTag, log };
+  // FORK(logs): logDir rides in sharedCtx, which every downstream handler receives by spread.
+  // FORK(smartlogs): sessionTag rides the same way.
+  const sharedCtx = { provider, model, body, stream, translatedBody, finalBody, requestStartTime, connectionId, apiKey, clientRawRequest, onRequestSuccess, pxpipe: pxpipeSummary, logDir: reqLogger.sessionPath, sessionTag, reqTag, log };
   const appendLog = (extra) => appendRequestLog({ model, provider, connectionId, ...extra }).catch(() => { });
   const trackDone = () => trackPendingRequest(model, provider, connectionId, false);
 
   // Provider forced streaming but client wants JSON
   if (!clientRequestedStreaming && providerRequiresStreaming) {
-    // FORK(logs): reqLogger added. It is not in sharedCtx — the non-streaming call below
-    // passes it explicitly for the same reason — and without it this handler wrote no
-    // stage 5 or 7, which made every successful forced-SSE-to-JSON row read as
-    // `incomplete` in the Logs tab. See handleForcedSSEToJson's docblock.
+    // FORK(logs): **`reqLogger` added, and no count covers it.** Upstream never gave this handler
+    // the logger, so it wrote no stages at all and every successful forced-SSE-to-JSON row read as
+    // incomplete. A merge that drops this argument fails silently the same way.
     const result = await handleForcedSSEToJson({ ...sharedCtx, providerResponse, sourceFormat, targetFormat: providerResponseFormat, reqLogger, customToolNames, trackDone, appendLog });
     if (result) { streamController.handleComplete(); return result; }
   }

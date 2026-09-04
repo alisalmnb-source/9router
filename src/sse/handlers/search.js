@@ -1,14 +1,14 @@
 import {
-  getProviderCredentials,
-  markAccountUnavailable,
   clearAccountError,
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
+// FORK(attempts): the account walk moved to one shared loop — see accountAttemptLoop.js.
+import { runAccountAttempts } from "../services/accountAttemptLoop.js";
 import { getSettings, getCombos } from "@/lib/localDb";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
 import { handleSearchCore } from "open-sse/handlers/search/index.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
@@ -144,88 +144,51 @@ async function handleSingleProviderSearch(body, providerInput, request, apiKey, 
   }
 
   // Credential + fallback loop
-  const excludeConnectionIds = new Set();
-  let lastError = null;
-  let lastStatus = null;
-
+  //
   // Credential fallback: some search providers reuse the API key of a related
   // chat provider (e.g. ollama-search reuses the `ollama` chat key, zai-search
   // reuses the `glm` chat key). When the search provider has no own connection,
-  // fall back to the linked provider's credentials.
+  // fall back to the linked provider's credentials. The shared loop handles both
+  // the second lookup and attributing the error lock to whichever provider
+  // actually owns the connection.
   const fallbackProviderId = resolvedProvider.credentialFallback;
 
   // Lock scope for this handler. Without it markAccountUnavailable would write
   // an account-wide `__all` lock, which on the credentialFallback path takes
-  // the shared chat key (e.g. glm) offline for chat as well. Must be passed to
-  // getProviderCredentials too, so the lock is read back under the same key.
+  // the shared chat key (e.g. glm) offline for chat as well. Passed as lockKey so
+  // getProviderCredentials reads the lock back under the same key.
   const searchLockKey = `websearch:${providerId}`;
 
-  while (true) {
-    // Provider that actually owns the connection in use — differs from
-    // providerId once we fall back, and error locks must be attributed to it.
-    let credentialProviderId = providerId;
-    let credentials = await getProviderCredentials(providerId, excludeConnectionIds, searchLockKey);
+  return runAccountAttempts({
+    provider: providerId,
+    credentialFallbackProvider: fallbackProviderId,
+    lockKey: searchLockKey,
+    label: `[${providerId}]`,
+    logTag: "SEARCH",
+    signal: request?.signal || null,
+    attempt: async ({ credentials }) => {
+      log.info("AUTH", `\x1b[32mUsing ${providerId} account: ${credentials.connectionName}\x1b[0m`);
 
-    // Fall back to the related chat provider's credentials when this search
-    // provider has none of its own (one key, chat + search).
-    if (!credentials && fallbackProviderId) {
-      credentials = await getProviderCredentials(fallbackProviderId, excludeConnectionIds, searchLockKey);
-      if (credentials) {
-        credentialProviderId = fallbackProviderId;
-        log.info("AUTH", `\x1b[32m${providerId} reusing ${fallbackProviderId} credentials\x1b[0m`);
-      }
-    }
+      const refreshedCredentials = await checkAndRefreshToken(providerId, credentials);
 
-    if (!credentials || credentials.allRateLimited) {
-      if (credentials?.allRateLimited) {
-        const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        log.warn("SEARCH", `[${providerId}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${providerId}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
-      }
-      if (excludeConnectionIds.size === 0) {
-        log.error("AUTH", `No credentials for provider: ${providerId}`);
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${providerId}`);
-      }
-      log.warn("SEARCH", "No more accounts available", { provider: providerId });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
-
-    log.info("AUTH", `\x1b[32mUsing ${providerId} account: ${credentials.connectionName}\x1b[0m`);
-
-    const refreshedCredentials = await checkAndRefreshToken(providerId, credentials);
-
-    const result = await handleSearchCore({
-      body: coreBody,
-      provider: resolvedProvider,
-      providerConfig,
-      credentials: refreshedCredentials,
-      log,
-      onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          accessToken: newCreds.accessToken,
-          refreshToken: newCreds.refreshToken,
-          providerSpecificData: newCreds.providerSpecificData,
-          testStatus: "active"
-        });
-      },
-      onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials);
-      }
-    });
-
-    if (result.success) return result.response;
-
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, credentialProviderId, searchLockKey);
-
-    if (shouldFallback) {
-      log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);
-      excludeConnectionIds.add(credentials.connectionId);
-      lastError = result.error;
-      lastStatus = result.status;
-      continue;
-    }
-
-    return result.response;
-  }
+      return handleSearchCore({
+        body: coreBody,
+        provider: resolvedProvider,
+        providerConfig,
+        credentials: refreshedCredentials,
+        log,
+        onCredentialsRefreshed: async (newCreds) => {
+          await updateProviderCredentials(credentials.connectionId, {
+            accessToken: newCreds.accessToken,
+            refreshToken: newCreds.refreshToken,
+            providerSpecificData: newCreds.providerSpecificData,
+            testStatus: "active"
+          });
+        },
+        onRequestSuccess: async () => {
+          await clearAccountError(credentials.connectionId, credentials);
+        }
+      });
+    },
+  });
 }

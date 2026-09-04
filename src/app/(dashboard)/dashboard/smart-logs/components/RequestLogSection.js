@@ -1,16 +1,17 @@
 "use client";
 
-// FORK(logs): the Logs tab — one row per upstream attempt, with a side panel
+// FORK(logs): the request log — one row per upstream attempt, with a side panel
 // showing a metadata summary and the raw dump files for that attempt.
 //
-// Two sources, each doing only what it is good at. The list comes from SQLite
-// (/api/logs/records), which is indexed on timestamp, provider, model and
-// connectionId, and is also the only place carrying the account, latency and
-// token counts. Bodies come from the filesystem (/api/logs/session/[name]) and
-// are fetched only when a row is opened, so the list never pays for reading them.
+// FORK(smartlogs): **was `LogsTab` under usage/components, reached through ?tab=inspector.** Moved
+// here, which is why the fork no longer edits usage/page.js at all — take that file from upstream
+// verbatim. Still self-contained and prop-less, which is what made the move a relocation rather
+// than a rewrite.
 //
-// Not the same source as the Details tab: that one reads
-// /api/usage/request-details, which blanks every payload for all callers.
+// Two sources: the list from the database (indexed, and the only place carrying account, latency
+// and token counts), bodies from the filesystem and only when a row is opened.
+//
+// Not the same source as upstream's Details tab, which blanks every payload for all callers.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Badge from "@/shared/components/Badge";
@@ -82,6 +83,20 @@ function getAccountLabel(connectionId, accountMap) {
   const label = account?.name || account?.email;
   if (label) return label;
   return `${String(connectionId).slice(0, 8)}…`;
+}
+
+/**
+ * FORK(smartlogs): the conversation column.
+ *
+ * **Two unrelated fields on one row with confusable names:** `sessionTag` is the conversation
+ * fingerprint written by the router, `sessionName` is the raw dump's directory name.
+ *
+ * A missing value is not a gap — only chat requests belong to a conversation — which is why the
+ * column header carries the explanation rather than leaving a reader to think the field is broken.
+ */
+function getSessionTag(record) {
+  const tag = record?.sessionTag;
+  return typeof tag === "string" && tag ? tag : null;
 }
 
 function formatBytes(bytes) {
@@ -353,6 +368,15 @@ function RecordPanel({ record, providerNameCache, accountMap }) {
             {getCacheCreationTokens(record.tokens) > 0 && ` · cache+ ${getCacheCreationTokens(record.tokens).toLocaleString()}`}
           </span>
         </SummaryField>
+        {/* FORK(smartlogs): the conversation this attempt served. Not the same thing as the
+            dump directory below, despite both being called a "session" somewhere. */}
+        <SummaryField label="Session">
+          {getSessionTag(record) ? (
+            <span className="break-all font-mono text-xs">{getSessionTag(record)}</span>
+          ) : (
+            <span className="text-text-muted">Not part of a conversation</span>
+          )}
+        </SummaryField>
         <SummaryField label="Record ID">
           <span className="break-all font-mono text-xs">{record.id}</span>
         </SummaryField>
@@ -431,7 +455,7 @@ function RecordPanel({ record, providerNameCache, accountMap }) {
 // Tab
 // ---------------------------------------------------------------------------
 
-export default function LogsTab() {
+export default function RequestLogSection() {
   const [query, setQuery] = useState({ page: 1, pageSize: 20 });
   const [filters, setFilters] = useState(EMPTY_FILTERS);
   const [reloadToken, setReloadToken] = useState(0);
@@ -662,7 +686,8 @@ export default function LogsTab() {
 
       <Card padding="none">
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px]">
+          {/* FORK(smartlogs): widened for the Session column. */}
+          <table className="w-full min-w-[1100px]">
             <thead>
               <tr className="border-b border-black/5 dark:border-white/5">
                 <th scope="col" className="p-4 text-left text-sm font-semibold text-text-main">Outcome</th>
@@ -670,6 +695,15 @@ export default function LogsTab() {
                 <th scope="col" className="p-4 text-left text-sm font-semibold text-text-main">Model</th>
                 <th scope="col" className="p-4 text-left text-sm font-semibold text-text-main">Provider</th>
                 <th scope="col" className="p-4 text-left text-sm font-semibold text-text-main">Account</th>
+                {/* FORK(smartlogs): matches the tag on the session cards above, so a
+                    conversation can be followed from the card down into its requests. */}
+                <th
+                  scope="col"
+                  className="p-4 text-left text-sm font-semibold text-text-main"
+                  title="Conversation fingerprint. Only chat requests belong to a conversation."
+                >
+                  Session
+                </th>
                 <th scope="col" className="p-4 text-right text-sm font-semibold text-text-main">In</th>
                 <th scope="col" className="p-4 text-right text-sm font-semibold text-text-main">Cached</th>
                 <th scope="col" className="p-4 text-right text-sm font-semibold text-text-main">Out</th>
@@ -681,7 +715,8 @@ export default function LogsTab() {
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={11} className="p-8 text-center text-text-muted">
+                  {/* FORK(smartlogs): 12, not 11 — the Session column was added. */}
+                  <td colSpan={12} className="p-8 text-center text-text-muted">
                     <span className="flex items-center justify-center gap-2">
                       <span className="material-symbols-outlined animate-spin text-[20px]">progress_activity</span>
                       Loading…
@@ -690,13 +725,13 @@ export default function LogsTab() {
                 </tr>
               ) : loadError ? (
                 <tr>
-                  <td colSpan={11} className="p-8 text-center text-text-muted">
+                  <td colSpan={12} className="p-8 text-center text-text-muted">
                     Failed to load records ({loadError}).
                   </td>
                 </tr>
               ) : visibleRecords.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="p-8 text-center text-text-muted">
+                  <td colSpan={12} className="p-8 text-center text-text-muted">
                     No records found.
                   </td>
                 </tr>
@@ -732,6 +767,13 @@ export default function LogsTab() {
                           </span>
                         ) : (
                           <span className="text-text-muted">—</span>
+                        )}
+                      </td>
+                      <td className="p-4 text-sm">
+                        {getSessionTag(record) ? (
+                          <span className="font-mono text-xs text-text-main">{getSessionTag(record)}</span>
+                        ) : (
+                          <span className="text-text-muted" title="Not part of a conversation">—</span>
                         )}
                       </td>
                       <td className="p-4 text-right font-mono text-sm text-text-main">

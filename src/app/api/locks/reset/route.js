@@ -1,19 +1,15 @@
 // FORK(locks): clear every model lock on one connection, plus the error state that
 // upstream leaves behind until the next successful request.
 //
-// Why a new route rather than PUT /api/providers/[id]: that handler is a strict
-// allowlist (name, priority, globalPriority, defaultModel, isActive, apiKey,
-// testStatus, lastError, lastErrorAt, providerSpecificData). modelLock_* and
-// backoffLevel are not in it, so nothing sent there can clear a lock.
+// A new route rather than PUT /api/providers/[id] because that handler is a strict allowlist and
+// neither modelLock_* nor backoffLevel is on it — anything sent there silently clears nothing.
 //
-// Why not /api/models/availability: its clearCooldown action is scoped to
-// provider + model and clears that key across every connection of the provider. A
-// button on one connection's row must not touch its siblings.
+// Not /api/models/availability either: its clear action is scoped to provider plus model and clears
+// that key across every connection of the provider. A button on one row must not touch its siblings.
 //
-// Why the /api/locks prefix: LOCAL_ONLY_PATHS in src/dashboardGuard.js matches with
-// startsWith, so a path segment in the middle — /api/providers/<id>/reset-lock — cannot
-// be expressed there and would sit outside the guard. See "Rules that outlive a
-// feature" in FORK-CHANGES.md.
+// **The /api/locks prefix is load-bearing:** the loopback list matches by prefix, so a path with a
+// segment in the middle (/api/providers/<id>/reset-lock) could not be expressed there and would sit
+// outside the guard entirely.
 
 import { NextResponse } from "next/server";
 import { getProviderConnectionById, updateProviderConnection } from "@/lib/db/index.js";

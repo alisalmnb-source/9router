@@ -4,16 +4,14 @@
 // and already returns { valid, error, refreshed }; this adds a deadline for the whole
 // round trip and normalises the two failure shapes into one.
 //
-// The deadline is the reason this file exists, and since v0.5.59 it is no longer the only
-// one in the path. fetchWithConnectionProxy in testUtils.js now defaults options.signal to
-// AbortSignal.timeout(15000), and no call site overrides it, so every individual
-// server-side fetch is bounded. That bound is per fetch, not per request: a single test
-// can make several in sequence, and neither testUtils.js nor the route races a deadline
-// for the response as a whole. So TEST_TIMEOUT_MS is still what stops the row spinning.
+// The deadline is the reason this file exists. Since v0.5.59 upstream also bounds each individual
+// server-side fetch at 15000ms — but that is per fetch, and one test can make several in sequence,
+// so this is still what stops the row spinning.
 //
-// Keep it above 15000. Being the longer of the two is what makes a stalled provider trip
-// upstream's per-fetch bound first, so the row reports the real error; set it lower and it
-// pre-empts that bound and replaces every such error with the generic message below.
+// **Keep it above upstream's per-fetch bound.** Being the longer of the two is what lets a stalled
+// provider trip upstream's bound first, so the row reports the real error. Set it lower and it
+// pre-empts that bound and replaces every such error with the generic message below — on exactly
+// the failures this button exists to diagnose. A precedence decision, not a value decision.
 
 const TEST_TIMEOUT_MS = 30000;
 

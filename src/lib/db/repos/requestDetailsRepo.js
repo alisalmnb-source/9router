@@ -118,28 +118,29 @@ async function flushToDatabase() {
             pxpipe: item.pxpipe || undefined,
             // FORK(logs): the raw dump's directory NAME, deliberately not its path.
             //
-            // DO NOT DROP THIS REDUCTION. It is the only place a path becomes a name.
-            // requestLogsFs.sessionNameFromLogDir does not strip anything — it screens
-            // the stored value and rejects a path outright, because a name containing
-            // "/" or "\" is a traversal vector. So an absolute value here resolves to
-            // null for every row, and the whole tab silently reports no raw dump.
-            //
-            // Why a name and not the path: nothing needs the path (the panel's path is
-            // recomputed from resolveLogsDir(), which also survives a moved working
-            // directory), and the path escaped — upstream's /api/usage/request-details
-            // copies every field but the four payloads, and that route is not in
-            // LOCAL_ONLY_PATHS, so a full path published the install directory and OS
-            // user to anyone who could reach the dashboard. Reducing it here rather
-            // than at the source keeps the change to one file the fork already owns.
-            // Lives in the JSON blob, so no schema change is needed.
+            // **Do not drop this reduction — it is the only place a path becomes a name.** The
+            // reader screens the stored value and rejects anything path-shaped, so an absolute
+            // value here resolves to null for every row and the whole view silently reports no
+            // raw dump. A path also leaks: the route publishing this record copies every field
+            // but the four payloads and is not loopback-only, so it would hand out the install
+            // directory and OS user.
             logDir: item.logDir ? item.logDir.split(/[\\/]/).filter(Boolean).pop() || null : null,
-            // FORK(logs): a top-level copy of the streaming flag, because `request`
-            // above is clipped once it passes maxJsonSize — which most real
-            // conversations do — and reading request.stream back from a clipped
-            // field yields undefined. Taken from item.request, not from the
-            // clipped copy, so it relies on truncateField returning a new value
-            // rather than mutating its argument.
+            // FORK(logs): top-level copy of the streaming flag, because `request` above is clipped
+            // once it passes maxJsonSize — which most real conversations do — and reading it back
+            // from the clipped field yields undefined. Taken from item.request, so it relies on
+            // truncateField returning a new value rather than mutating its argument.
             stream: item.request?.stream ?? null,
+            // FORK(smartlogs): fingerprint of the conversation this attempt served, so log rows can
+            // be grouped and matched against the live session cards.
+            //
+            // **A fingerprint, never the session id**, for the same reason as logDir: everything
+            // written here is published. Client-supplied ids would become a permanent public copy.
+            // The reduction happens at the source in chat.js, the only place holding the raw value.
+            //
+            // Sits outside the four truncated payloads, like `stream`, so it cannot be clipped away.
+            // Null for every modality but chat — an absent value, not a missing one, and the UI is
+            // required to show the difference.
+            sessionTag: item.sessionTag || null,
           };
 
           db.run(

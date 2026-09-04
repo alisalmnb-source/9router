@@ -4,25 +4,16 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { getStatusVariant as getConnectionStatusVariant } from "@/shared/utils/connectionStatus";
 import PropTypes from "prop-types";
 import { Card, Badge, Button, Modal, Select, Toggle, EditConnectionModal, ConfirmModal } from "@/shared/components";
+// FORK(smartrouting): this card is the media providers' only strategy control, and it shares
+// `providerStrategies[<id>]` with the chat provider page — see mediaStrategyOptions.
+import { ROUTING_STRATEGY, INHERIT_STRATEGY, mediaStrategyOptions } from "@/lib/routingStrategy";
+import { useCountdown } from "@/shared/hooks/useCountdown";
 
 // ── CooldownTimer ──────────────────────────────────────────────
+// FORK(smartlogs): the counting moved to @/shared/hooks/useCountdown, unchanged — the session cards
+// need the same arithmetic with a different presentation. Only presentation is left here.
 function CooldownTimer({ until }) {
-  const [remaining, setRemaining] = useState("");
-
-  useEffect(() => {
-    const update = () => {
-      const diff = new Date(until).getTime() - Date.now();
-      if (diff <= 0) { setRemaining(""); return; }
-      const s = Math.floor(diff / 1000);
-      if (s < 60) setRemaining(`${s}s`);
-      else if (s < 3600) setRemaining(`${Math.floor(s / 60)}m ${s % 60}s`);
-      else setRemaining(`${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`);
-    };
-    update();
-    const t = setInterval(update, 1000);
-    return () => clearInterval(t);
-  }, [until]);
-
+  const remaining = useCountdown(until);
   if (!remaining) return null;
   return <span className="text-xs text-orange-500 font-mono">⏱ {remaining}</span>;
 }
@@ -334,7 +325,7 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
       const current = data.providerStrategies || {};
       const override = {};
       if (strategy) override.fallbackStrategy = strategy;
-      if (strategy === "round-robin" && stickyLimit !== "") override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
+      if (strategy === ROUTING_STRATEGY.ROUND_ROBIN && stickyLimit !== "") override.stickyRoundRobinLimit = Number(stickyLimit) || 3;
       const updated = { ...current };
       if (Object.keys(override).length === 0) delete updated[providerId];
       else updated[providerId] = override;
@@ -403,23 +394,37 @@ export default function ConnectionsCard({ providerId, isOAuth }) {
       <Card>
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-4">
           <h2 className="text-lg font-semibold">Connections</h2>
+          {/*
+            FORK(smartrouting): was a boolean Round Robin toggle. It tested
+            `=== "round-robin"`, so a stored `smart-routing` rendered it UNCHECKED — the card
+            reported the wrong state, and the first touch overwrote the setting. That matters
+            because this control and the chat provider page write the same
+            `providerStrategies[<id>]` entry, and twenty-seven provider ids appear on both.
+            Smart Routing is still not offered here; it is only shown when it is what is
+            stored. See mediaStrategyOptions.
+          */}
           <div className="flex flex-wrap items-center gap-2">
-            <span className="text-xs text-text-muted font-medium">Round Robin</span>
-            <Toggle
-              checked={providerStrategy === "round-robin"}
-              onChange={(enabled) => {
-                const strategy = enabled ? "round-robin" : null;
+            <span className="text-xs text-text-muted font-medium">Strategy</span>
+            <Select
+              options={mediaStrategyOptions(providerStrategy)}
+              value={providerStrategy || INHERIT_STRATEGY}
+              onChange={(e) => {
+                const next = e.target.value;
+                const strategy = next === INHERIT_STRATEGY ? null : next;
                 setProviderStrategy(strategy);
-                if (enabled && !providerStickyLimit) setProviderStickyLimit("1");
-                saveStrategy(strategy, enabled ? (providerStickyLimit || "1") : providerStickyLimit);
+                const sticky = strategy === ROUTING_STRATEGY.ROUND_ROBIN ? (providerStickyLimit || "1") : providerStickyLimit;
+                if (strategy === ROUTING_STRATEGY.ROUND_ROBIN && !providerStickyLimit) setProviderStickyLimit("1");
+                saveStrategy(strategy, sticky);
               }}
+              className="w-44"
+              selectClassName="py-1.5 text-xs"
             />
-            {providerStrategy === "round-robin" && (
+            {providerStrategy === ROUTING_STRATEGY.ROUND_ROBIN && (
               <div className="flex flex-wrap items-center gap-1.5">
                 <span className="text-xs text-text-muted">Sticky:</span>
                 <input
                   type="number" min={1} value={providerStickyLimit}
-                  onChange={(e) => { setProviderStickyLimit(e.target.value); saveStrategy("round-robin", e.target.value); }}
+                  onChange={(e) => { setProviderStickyLimit(e.target.value); saveStrategy(ROUTING_STRATEGY.ROUND_ROBIN, e.target.value); }}
                   className="w-16 px-2 py-1 text-xs border border-border rounded-md bg-background focus:outline-none focus:border-primary"
                 />
               </div>

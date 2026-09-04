@@ -7,9 +7,11 @@ import Drawer from "@/shared/components/Drawer";
 import Pagination from "@/shared/components/Pagination";
 import { cn } from "@/shared/utils/cn";
 import { AI_PROVIDERS, getProviderByAlias } from "@/shared/constants/providers";
-// FORK(logs): these three were local to this file and copied into LogsTab, which renders
-// the same rows. One definition now, so the two tabs cannot report different numbers for
-// one request — see the header of usageTokens.js.
+// FORK(logs): these three were local to this file and copied into the fork's request log,
+// which renders the same rows. One definition now, so the two views cannot report different
+// numbers for one request — see the header of usageTokens.js. That view has since moved to
+// the Smart Logs page (smart-logs/components/RequestLogSection.js); the sharing is unaffected,
+// which is why this import is the fork's only edit to this file.
 import { getCachedTokens, getCacheCreationTokens, getInputTokens } from "@/shared/utils/usageTokens";
 
 let providerNameCache = null;

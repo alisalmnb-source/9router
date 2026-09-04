@@ -15,15 +15,12 @@ export const revalidate = 0;
  * Fetched lazily, only when a row is opened in the panel, so the list view
  * never pays for reading these files.
  *
- * `name` is attacker-controlled. readSession() screens it by rejecting the
- * traversal vectors — path separators, bare "." / "..", NUL — then re-checks
- * that the resolved path stays inside the logs root, returning null on any
- * mismatch, which surfaces here as a 404.
+ * **`name` is attacker-controlled.** readSession() rejects the traversal vectors and re-checks that
+ * the resolved path stays inside the dump root, returning null on any mismatch — a 404 here.
  *
- * Deliberately a deny-list, not an allow-list of permitted characters: the
- * writer barely sanitises the model id, so an allow-list silently loses
- * directories and leaves them unprunable. See the reasoning on
- * UNSAFE_NAME_RE in src/lib/requestLogsFs.js before tightening this.
+ * **A deny-list, not an allow-list**, and do not tighten it: the writer barely sanitises the model
+ * id, so an allow-list silently loses directories and leaves them unprunable. Reasoning is on
+ * UNSAFE_NAME_RE in src/lib/requestLogsFs.js.
  */
 export async function GET(_request, { params }) {
   try {

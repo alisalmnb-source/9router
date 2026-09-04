@@ -50,10 +50,40 @@ export async function writeStreamError(writer, statusCode, message) {
 }
 
 /**
+ * FORK(smartrouting): rate-limit and quota headers worth keeping past this function.
+ *
+ * **An allow-list, not the whole bag** — the result travels through several layers, and copying
+ * authorization or set-cookie along for the ride would be gratuitous. The `-remaining` entries are
+ * the load-bearing ones: a zero there is the provider stating outright that nothing is left, which
+ * classification trusts above any reported wait.
+ */
+const RATE_LIMIT_HEADER_PREFIXES = ["x-ratelimit", "ratelimit", "x-rate-limit", "retry-after", "x-quota", "x-usage"];
+
+function captureRateLimitHeaders(response) {
+  const out = {};
+  try {
+    response.headers.forEach((value, key) => {
+      const lower = String(key).toLowerCase();
+      if (RATE_LIMIT_HEADER_PREFIXES.some((prefix) => lower.startsWith(prefix))) {
+        out[lower] = String(value);
+      }
+    });
+  } catch { /* headers unavailable — classification falls back to status and message */ }
+  return out;
+}
+
+/**
  * Parse upstream provider error response
  * @param {Response} response - Fetch response from provider
  * @param {object} [executor] - Optional executor with parseError() override for provider-specific parsing
- * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number}>}
+ * @returns {Promise<{statusCode: number, message: string, resetsAtMs?: number, errorSignals?: object}>}
+ *
+ * FORK(smartrouting): `errorSignals` is `{ headers, body }` — the selected rate-limit
+ * headers plus the raw body text. This is the only place in the request path that still
+ * holds the Response object, so it is the only place those can be captured; by the time
+ * the account-retry loop decides how heavily to count the failure, all it otherwise has is
+ * a status code and a message string. A signal that was sent but cannot be read is worse
+ * than one that was never sent, because nothing reveals it is missing.
  */
 export async function parseUpstreamError(response, executor = null) {
   let bodyText = "";
@@ -63,13 +93,16 @@ export async function parseUpstreamError(response, executor = null) {
     bodyText = "";
   }
 
+  // FORK(smartrouting): captured before the executor branch below so both paths carry it.
+  const errorSignals = { headers: captureRateLimitHeaders(response), body: bodyText };
+
   // Let executor-specific parser extract provider-specific fields (e.g. codex resetsAtMs)
   if (executor && typeof executor.parseError === "function") {
     try {
       const parsed = executor.parseError(response, bodyText);
       if (parsed && typeof parsed === "object") {
         const msg = parsed.message || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
-        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs };
+        return { statusCode: parsed.status || response.status, message: msg, resetsAtMs: parsed.resetsAtMs, errorSignals };
       }
     } catch { /* fall through to default parsing */ }
   }
@@ -85,7 +118,7 @@ export async function parseUpstreamError(response, executor = null) {
   const messageStr = typeof message === "string" ? message : JSON.stringify(message);
   const finalMessage = messageStr || DEFAULT_ERROR_MESSAGES[response.status] || `Upstream error: ${response.status}`;
 
-  return { statusCode: response.status, message: finalMessage };
+  return { statusCode: response.status, message: finalMessage, errorSignals };
 }
 
 /**
@@ -93,14 +126,18 @@ export async function parseUpstreamError(response, executor = null) {
  * @param {number} statusCode - HTTP status code
  * @param {string} message - Error message
  * @param {number} [resetsAtMs] - Optional precise cooldown expiry (ms epoch) for provider-specific quota errors
- * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number }}
+ * @param {object} [errorSignals] - FORK(smartrouting): `{ headers, body }` from parseUpstreamError.
+ *        Undefined for every locally-generated error, which is correct: those have no upstream
+ *        response to have published anything, and classification falls back to status and message.
+ * @returns {{ success: false, status: number, error: string, response: Response, resetsAtMs?: number, errorSignals?: object }}
  */
-export function createErrorResult(statusCode, message, resetsAtMs) {
+export function createErrorResult(statusCode, message, resetsAtMs, errorSignals) {
   return {
     success: false,
     status: statusCode,
     error: message,
     resetsAtMs,
+    errorSignals,
     response: errorResponse(statusCode, message)
   };
 }

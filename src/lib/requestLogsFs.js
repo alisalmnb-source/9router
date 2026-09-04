@@ -19,30 +19,17 @@
 import fs from "node:fs";
 import path from "node:path";
 
-// Directory names reach this module from a URL, so they are screened before
-// touching the filesystem — as a deny-list, not an allow-list of permitted
-// characters.
-//
-// Do not tighten this into an allow-list. requestLogger.createLogSession
-// sanitises only "/" and ":" in the model id, so a model containing "@" or "+"
-// produces a directory an allow-list refuses, and that fails silently twice
-// over: the row reports no dump although the directory is there, and
-// pruneSessions never reclaims it, since it only deletes names it can identify.
-//
-// Path separators, bare "." / "..", and NUL are the only characters that could
-// escape the logs root. path.resolve containment in safeSessionPath is the
-// backstop, and parseSessionName's timestamp check filters out everything else.
+// Directory names reach this module from a URL, so they are screened before touching the
+// filesystem — **as a deny-list, and it must stay one.** The writer sanitises only "/" and ":" in
+// the model id, so a model containing "@" or "+" produces a directory an allow-list would refuse,
+// failing silently twice over: the row reports no dump though the directory is there, and
+// pruneSessions never reclaims it because it only deletes names it can identify.
 const UNSAFE_NAME_RE = /[/\\]|\0/;
 const DOT_SEGMENT_RE = /^\.{1,2}$/;
 
 function isUnsafeSessionName(name) {
-  // Reject a non-string outright rather than stringifying it. safeSessionPath hands
-  // whatever survives this screen straight to path.resolve, which throws on a
-  // non-string — so coercing here would let a truthy non-string past the screen and
-  // turn a "no such session" answer into an exception. Every caller today passes a
-  // string (the route param, or a value already type-checked by
-  // sessionNameFromLogDir), so this is about the two halves of the guard agreeing,
-  // not about a reachable input.
+  // Non-strings are rejected, not coerced: safeSessionPath hands whatever survives straight to
+  // path.resolve, which throws on a non-string, turning "no such session" into a 500.
   if (typeof name !== "string" || !name) return true;
   return UNSAFE_NAME_RE.test(name) || DOT_SEGMENT_RE.test(name);
 }
@@ -50,17 +37,12 @@ function isUnsafeSessionName(name) {
 // Guards against a single multi-MB SSE transcript blowing up an API response.
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 
-// Markers that prove a streamed response finished, rather than the transcript
-// merely having received its first chunk.
+// Markers that prove a streamed response finished, rather than the transcript merely having
+// received its first chunk.
 //
-// Do not reduce this to `[DONE]`. open-sse/utils/stream.js has three sites that
-// append that sentinel and a plain OpenAI chat-completions stream on the
-// translate path hits none of them: two are gated on keepsOpenAIResponsesFormat
-// (Responses API in AND out), and the third is the terminator at the end of the
-// PASSTHROUGH branch of flush, which returns before the translate path runs.
-// (That third one is the only site the !isGeminiFamily guard covers — do not read
-// the guard as the reason this list is wide.) So such a stream ends with its last
-// chunk carrying `"finish_reason":"stop"` and a usage block, and nothing else.
+// **Do not narrow this to `[DONE]`.** All three sites in open-sse/utils/stream.js that append that
+// sentinel are unreachable on the translate path, so a plain OpenAI chat-completions stream there
+// ends with a finish reason and a usage block and nothing else.
 const STREAM_TERMINATORS = ["[DONE]", "response.completed", "message_stop"];
 
 // A non-null finish reason in any format: OpenAI's `finish_reason` (stop, length,
@@ -145,19 +127,12 @@ function parseSessionName(name) {
 }
 
 /**
- * Validate a persisted requestDetails.logDir as a session directory name.
+ * Validate a persisted `logDir` as a session directory name.
  *
- * The stored value is already the bare name — requestDetailsRepo reduces
- * reqLogger.sessionPath to its final segment on the way in, so an absolute path
- * never reaches the record and never reaches a URL from here. That reduction is
- * the single normalisation point; this function only screens the result and does
- * not strip anything itself.
- *
- * Which is why the two have to move together: parseSessionName rejects a name
- * containing a path separator, so if that reduction is ever removed this returns
- * null for every row and the whole tab reports no raw dump.
- *
- * Returns null unless it parses as a real session name.
+ * The stored value is already the bare name — requestDetailsRepo reduces the path to its final
+ * segment on the way in, and that is the single normalisation point. **This function only screens;
+ * it strips nothing.** So the two must move together: a name containing a separator is rejected
+ * here, meaning if that reduction is ever removed every row reports no raw dump, with no error.
  */
 export function sessionNameFromLogDir(logDir) {
   if (typeof logDir !== "string" || !logDir) return null;
@@ -165,13 +140,8 @@ export function sessionNameFromLogDir(logDir) {
 }
 
 /**
- * Absolute path of a session directory as resolved right now.
- *
- * Built from resolveLogsDir() and the session name, so it points at where the
- * files are now rather than where they were when the row was written — which is
- * the other reason the record stores only a name. The dashboard shows this path
- * so a file can be opened directly, which also makes a broken logs root
- * immediately obvious.
+ * Absolute path of a session directory as resolved right now — where the files are today, not
+ * where they were when the row was written. The other reason the record stores only a name.
  */
 export function sessionDirPath(name) {
   return safeSessionPath(name);
@@ -203,12 +173,9 @@ function readFileCapped(filePath) {
   if (!stat.isFile()) return null;
 
   if (stat.size > MAX_FILE_BYTES) {
-    // openSync is inside the try, not before it, and the reason is the failure mode rather
-    // than style: a stage file can disappear or lock between the statSync above and this
-    // line — a concurrent pruneSessions, an external cleanup of logs/, a virus scanner
-    // holding a freshly appended transcript — and an uncaught throw here propagates out of
-    // readSession and 500s the whole request. Returning null instead skips one stage, which
-    // is what the under-cap branch below already does for the same error.
+    // openSync inside the try, not before it: a stage file can disappear or lock between the
+    // statSync above and this line, and an uncaught throw here 500s the whole request instead of
+    // skipping one stage.
     let fd;
     try {
       fd = fs.openSync(filePath, "r");
@@ -265,10 +232,9 @@ function readTail(filePath, bytes = TAIL_PROBE_BYTES) {
 /**
  * Classify how an attempt ended, from the dump alone.
  *
- * Needed because requestDetails.status is unreliable for streaming:
- * streamingHandler.js hardcodes status:"success" both when the stream opens and
- * when it completes, so a stream that dies mid-flight still reads as a success.
- * Deriving it here keeps that upstream file untouched.
+ * Needed because the stored status cannot answer this for a stream: streamingHandler.js writes
+ * "success" both when the stream OPENS and when it completes, so a stream that dies mid-flight
+ * still reads as a success. Deriving it here keeps that upstream file untouched.
  *
  * @returns {"error"|"ok"|"incomplete"|"unknown"}
  */
@@ -295,36 +261,20 @@ export function deriveOutcome(name) {
 }
 
 /**
- * Did this record's stream reach buildOnStreamComplete's callback?
+ * Did this record's stream reach the completion callback?
  *
- * That callback fires from finalizeStream() in open-sse/utils/stream.js, reached from
- * three kinds of place since v0.5.59 and deduplicated by a `finalized` flag: flush's
- * normal end, an OpenAI Responses terminal event inside transform(), and flush's own
- * catch. The part this function rests on survives all three: a TransformStream does not
- * run flush at all on abort or cancel, and no terminal event arrives on a stream that
- * died mid-flight, so an aborted stream never reaches the callback. Its row keeps the
- * placeholder body, zero tokens and ttft 0, and is upserted with real values only once
- * the stream ends.
+ * **Upstream dependency:** that callback fires from finalizeStream() in open-sse/utils/stream.js,
+ * reached from three deduplicated places since v0.5.59. What this rests on survives all three —
+ * a TransformStream never runs flush on abort or cancel, so an aborted stream never reaches the
+ * callback and its row keeps the placeholder, zero tokens and ttft 0. **Revisit only if upstream
+ * starts calling finalizeStream() somewhere a stream can still be running.**
  *
- * The flush catch is the one path that can report a stream that ended badly as one that
- * ended: a throw while flush translates the tail still calls finalizeStream(), so the
- * accumulated content reaches the record and this function answers "ok" although the
- * transcript carries no terminal marker. resolveOutcome puts this signal ahead of the
- * transcript, so the record wins. Deliberately not reordered for it — the common trigger
- * is a client that has already disconnected, where the upstream attempt did finish and
- * "ok" is the honest answer. Revisit only if upstream starts calling finalizeStream()
- * somewhere a stream can still be running.
+ * Reads the record's `response`, which is replaced wholesale by a stub past the JSON size limit.
+ * A clipped response fails the guard below and resolveOutcome falls through to the transcript,
+ * which costs nothing: a response only grows large enough to be clipped by completing, while an
+ * aborted stream keeps the short placeholder and is still read here.
  *
- * Reads the record's `response`, which requestDetailsRepo replaces wholesale
- * with a {_truncated, …} stub past observabilityMaxJsonSize. A clipped response
- * has no `type` left, so it fails the guard below and resolveOutcome falls
- * through to the transcript. That costs nothing, and the reason is worth
- * knowing before reordering the steps there: a response only grows large enough
- * to be clipped by completing, while an aborted stream keeps the short
- * placeholder and is still read here.
- *
- * Not exported: callers should go through resolveOutcome, which applies the
- * error precedence this function knows nothing about.
+ * Not exported — go through resolveOutcome, which applies the error precedence.
  *
  * @returns {"ok"|"incomplete"|null} null when the record carries no usable stream signal
  */
@@ -455,15 +405,13 @@ export function readSession(name) {
 
     if (stage.kind === "json") {
       try {
-        // Strip a UTF-8 BOM if present: JSON.parse rejects it. requestLogger.js
-        // does not emit one, but files copied or hand-edited on Windows may.
+        // Strip a UTF-8 BOM: JSON.parse rejects it. The writer emits none, but hand-edited
+        // files may carry one.
         //
-        // Rendered exactly as stored, headers included. Masking happens on the
-        // write side only — maskSensitiveHeaders at all four write sites in
-        // open-sse/utils/requestLogger.js — so every file under logs/ is already
-        // safe when it lands here. There is deliberately no second pass on read:
-        // checklist item 2 is what keeps the write side honest, and a reader that
-        // re-masked would make this view disagree with the file on disk.
+        // **Rendered exactly as stored, headers included, and there is deliberately no second
+        // masking pass on read.** Masking is write-side only, so if it is ever lost at a write
+        // site nothing below catches it — and a reader that re-masked would make this view
+        // disagree with the file on disk, which is the claim the feature rests on.
         entry.json = JSON.parse(read.text.replace(/^\uFEFF/, ""));
       } catch {
         // Truncated or mid-write file: hand back the text so it is still useful.
@@ -483,9 +431,7 @@ export function readSession(name) {
 /**
  * Delete the oldest session directories until at most maxCount remain.
  *
- * This is the only fork-added code that removes files (upstream deletes in
- * src/mitm/*, src/lib/db/backup.js, src/lib/tunnel/* and elsewhere), so it is
- * deliberately narrow:
+ * **The only fork-added code that removes files**, so it is deliberately narrow:
  *   - operates only on first-level children of resolveLogsDir()
  *   - only on entries that are real directories (symlinks are skipped)
  *   - only on names that parse as a valid session, so unrelated files such as
@@ -526,13 +472,11 @@ function pruneSessions(maxCount) {
 }
 
 /**
- * Throttled prune, safe to call on every list request. Keeps retention working
- * without adding a scheduler or touching the request path.
+ * Throttled prune, safe to call on every list request — retention without a scheduler.
  *
- * PRUNE_THROTTLE_MS sets a minimum gap between runs, not a period: nothing calls
- * this on a timer, so retention advances only as often as someone loads the Logs
- * tab. The throttle is module state, so a restart clears it and the next call
- * prunes immediately.
+ * **A minimum gap between runs, not a period.** Nothing calls this on a timer, so retention
+ * advances only as often as someone opens the view: the limit is a high-water mark applied on the
+ * next look, not a live ceiling. Module state, so a restart clears it.
  */
 export function maybePruneSessions(maxCount) {
   const now = Date.now();

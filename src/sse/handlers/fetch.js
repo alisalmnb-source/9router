@@ -1,14 +1,14 @@
 import {
-  getProviderCredentials,
-  markAccountUnavailable,
   clearAccountError,
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
+// FORK(attempts): the account walk moved to one shared loop — see accountAttemptLoop.js.
+import { runAccountAttempts } from "../services/accountAttemptLoop.js";
 import { getSettings, getCombos } from "@/lib/localDb";
 import { AI_PROVIDERS, resolveProviderId } from "@/shared/constants/providers.js";
 import { handleFetchCore } from "open-sse/handlers/fetch/index.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
@@ -154,67 +154,54 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
   }
 
   // Credential + fallback loop
-  const excludeConnectionIds = new Set();
-  let lastError = null;
-  let lastStatus = null;
+  //
+  // FORK(attempts): lockKey stays null here, as it was before — this handler has no model
+  // dimension, so a failure writes the account-wide modelLock___all, and the lock has to be
+  // read back under the same key.
+  return runAccountAttempts({
+    provider: providerId,
+    lockKey: null,
+    label: `[${providerId}]`,
+    logTag: "FETCH",
+    signal: request?.signal || null,
+    attempt: async ({ credentials }) => {
+      log.info("AUTH", `\x1b[32mUsing ${providerId} account: ${credentials.connectionName}\x1b[0m`);
 
-  while (true) {
-    const credentials = await getProviderCredentials(providerId, excludeConnectionIds);
+      const refreshedCredentials = await checkAndRefreshToken(providerId, credentials);
 
-    if (!credentials || credentials.allRateLimited) {
-      if (credentials?.allRateLimited) {
-        const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        log.warn("FETCH", `[${providerId}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${providerId}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
-      }
-      if (excludeConnectionIds.size === 0) {
-        log.error("AUTH", `No credentials for provider: ${providerId}`);
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${providerId}`);
-      }
-      log.warn("FETCH", "No more accounts available", { provider: providerId });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
-
-    log.info("AUTH", `\x1b[32mUsing ${providerId} account: ${credentials.connectionName}\x1b[0m`);
-
-    const refreshedCredentials = await checkAndRefreshToken(providerId, credentials);
-
-    const result = await handleFetchCore({
-      url: targetUrl,
-      format,
-      maxCharacters,
-      provider: resolvedProvider.id,
-      providerConfig,
-      credentials: refreshedCredentials,
-      log,
-      onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          accessToken: newCreds.accessToken,
-          refreshToken: newCreds.refreshToken,
-          providerSpecificData: newCreds.providerSpecificData,
-          testStatus: "active"
-        });
-      }
-    });
-
-    if (result.success) {
-      await clearAccountError(credentials.connectionId, credentials);
-      return new Response(JSON.stringify(result.data), {
-        headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+      const result = await handleFetchCore({
+        url: targetUrl,
+        format,
+        maxCharacters,
+        provider: resolvedProvider.id,
+        providerConfig,
+        credentials: refreshedCredentials,
+        log,
+        onCredentialsRefreshed: async (newCreds) => {
+          await updateProviderCredentials(credentials.connectionId, {
+            accessToken: newCreds.accessToken,
+            refreshToken: newCreds.refreshToken,
+            providerSpecificData: newCreds.providerSpecificData,
+            testStatus: "active"
+          });
+        }
       });
-    }
 
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, providerId);
+      if (result.success) {
+        await clearAccountError(credentials.connectionId, credentials);
+        return {
+          success: true,
+          response: new Response(JSON.stringify(result.data), {
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" }
+          }),
+        };
+      }
 
-    if (shouldFallback) {
-      log.warn("AUTH", `Account ${credentials.connectionName} unavailable (${result.status}), trying fallback`);
-      excludeConnectionIds.add(credentials.connectionId);
-      lastError = result.error;
-      lastStatus = result.status;
-      continue;
-    }
-
-    return errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "Fetch failed");
-  }
+      return result;
+    },
+    // This handler answers with its own JSON envelope rather than the core's Response, so the
+    // non-rotating exit is built here instead of reusing result.response.
+    buildFailureResponse: (result) =>
+      errorResponse(result.status || HTTP_STATUS.BAD_GATEWAY, result.error || "Fetch failed"),
+  });
 }

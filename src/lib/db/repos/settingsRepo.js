@@ -1,5 +1,9 @@
 import { getAdapter } from "../driver.js";
 import { parseJson, stringifyJson } from "../helpers/jsonCol.js";
+// FORK(attempts): imported rather than written out. These two numbers are also the resolver's
+// fallbacks and the Settings card's placeholders, and the same number in two files is the one
+// thing that goes wrong silently.
+import { DEFAULT_MAX_ACCOUNT_ATTEMPTS, DEFAULT_ACCOUNT_ATTEMPT_WINDOW_MS } from "../../attemptPolicy.js";
 
 const DEFAULT_MITM_ROUTER_BASE = "http://localhost:20128";
 const DEFAULT_HEADROOM_URL = process.env.HEADROOM_URL || "http://localhost:8787";
@@ -13,6 +17,10 @@ const DEFAULT_SETTINGS = {
   tailscaleUrl: "",
   stickyRoundRobinLimit: 3,
   providerStrategies: {},
+  // FORK(attempts): the two ceilings on one client request's account walk. Value fields only — no
+  // switch, because the "off" behaviour is the broken one. See src/lib/attemptPolicy.js.
+  maxAccountAttempts: DEFAULT_MAX_ACCOUNT_ATTEMPTS,
+  accountAttemptWindowMs: DEFAULT_ACCOUNT_ATTEMPT_WINDOW_MS,
   quotaVisibility: {},
   comboStrategy: "fallback",
   comboStickyRoundRobinLimit: 1,
@@ -39,7 +47,7 @@ const DEFAULT_SETTINGS = {
   samlLoginLabel: "Sign in with SAML SSO",
   samlAttributeEmail: "email",
   samlAttributeName: "name",
-  // FORK(logs): recording on by default — the Logs tab depends on it. ENABLE_REQUEST_LOGS
+  // FORK(logs): recording on by default — the Smart Logs request log depends on it. ENABLE_REQUEST_LOGS
   // in .env overrides this either way; the default keeps recording on if that
   // variable is ever removed.
   enableObservability: true,

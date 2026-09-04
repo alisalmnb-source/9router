@@ -1,11 +1,12 @@
 import {
   extractApiKey, isValidApiKey,
-  getProviderCredentials, markAccountUnavailable,
 } from "../services/auth.js";
+// FORK(attempts): the account walk moved to one shared loop — see accountAttemptLoop.js.
+import { runAccountAttempts } from "../services/accountAttemptLoop.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleTtsCore } from "open-sse/handlers/ttsCore.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { AI_PROVIDERS } from "@/shared/constants/providers";
 import { handleComboChat } from "open-sse/services/combo.js";
@@ -54,7 +55,7 @@ export async function handleTts(request) {
     return handleComboChat({
       body,
       models: comboModels,
-      handleSingleModel: (b, m) => handleSingleModelTts(b, m, responseFormat, language, style),
+      handleSingleModel: (b, m) => handleSingleModelTts(b, m, responseFormat, language, style, request),
       log,
       comboName: modelStr,
       comboStrategy,
@@ -62,10 +63,11 @@ export async function handleTts(request) {
     });
   }
 
-  return handleSingleModelTts(body, modelStr, responseFormat, language, style);
+  return handleSingleModelTts(body, modelStr, responseFormat, language, style, request);
 }
 
-async function handleSingleModelTts(body, modelStr, responseFormat, language, style) {
+// FORK(attempts): `request` added so the shared loop can see the client's abort signal.
+async function handleSingleModelTts(body, modelStr, responseFormat, language, style, request = null) {
   const modelInfo = await getModelInfo(modelStr);
   if (!modelInfo.provider) return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid model format");
 
@@ -80,36 +82,15 @@ async function handleSingleModelTts(body, modelStr, responseFormat, language, st
   }
 
   // Credentialed providers — fallback loop (same pattern as embeddings)
-  const excludeConnectionIds = new Set();
-  let lastError = null;
-  let lastStatus = null;
-
-  while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
-
-    if (!credentials || credentials.allRateLimited) {
-      if (credentials?.allRateLimited) {
-        const msg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model}] ${msg}`, credentials.retryAfter, credentials.retryAfterHuman);
-      }
-      if (excludeConnectionIds.size === 0) return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
-
-    log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
-
-    const result = await handleTtsCore({ provider, model, input: body.input, credentials, responseFormat, language, style });
-
-    if (result.success) return result.response;
-
-    const { shouldFallback } = await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model);
-    if (shouldFallback) {
-      excludeConnectionIds.add(credentials.connectionId);
-      lastError = result.error;
-      lastStatus = result.status;
-      continue;
-    }
-    return result.response || errorResponse(result.status, result.error);
-  }
+  return runAccountAttempts({
+    provider,
+    lockKey: model,
+    label: `[${provider}/${model}]`,
+    logTag: "TTS",
+    signal: request?.signal || null,
+    attempt: async ({ credentials }) => {
+      log.info("AUTH", `\x1b[32mUsing ${provider} account: ${credentials.connectionName}\x1b[0m`);
+      return handleTtsCore({ provider, model, input: body.input, credentials, responseFormat, language, style });
+    },
+  });
 }

@@ -5,10 +5,14 @@ import {
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
+// FORK(attempts): the account walk moved to one shared loop — see accountAttemptLoop.js.
+// getProviderCredentials and markAccountUnavailable are still imported above because
+// handleVideoGet below is deliberately a single attempt and calls them directly.
+import { runAccountAttempts } from "../services/accountAttemptLoop.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo } from "../services/model.js";
 import { handleVideoProxyCore, getVideoConfig, sanitizeSecrets } from "open-sse/handlers/videoCore.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse } from "open-sse/utils/error.js";
 import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import * as log from "../utils/logger.js";
@@ -112,66 +116,52 @@ export async function handleVideoCreate(request, action) {
   const preferredConnectionId = request.headers.get("x-connection-id") || null;
   const idempotencyKey = request.headers.get("idempotency-key") || null;
 
-  const excludeConnectionIds = new Set();
-  let lastError = null;
-  let lastStatus = null;
+  return runAccountAttempts({
+    provider,
+    lockKey: model,
+    label: `[${provider}/${model || "video"}]`,
+    logTag: "VIDEO",
+    signal: request.signal,
+    selectOptions: { preferredConnectionId },
+    attempt: async ({ credentials }) => {
+      const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
 
-  while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model, { preferredConnectionId });
+      const result = await handleVideoProxyCore({
+        provider,
+        action,
+        rawBody: forwardBody,
+        contentType: bodyInfo.contentType || null,
+        idempotencyKey,
+        credentials: refreshedCredentials,
+        signal: request.signal,
+        log,
+        onCredentialsRefreshed: async (newCreds) => {
+          await updateProviderCredentials(credentials.connectionId, {
+            accessToken: newCreds.accessToken,
+            refreshToken: newCreds.refreshToken,
+            providerSpecificData: newCreds.providerSpecificData,
+            testStatus: "active",
+          });
+        },
+      });
 
-    if (!credentials || credentials.allRateLimited) {
-      if (credentials?.allRateLimited) {
-        const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        return unavailableResponse(status, `[${provider}/${model || "video"}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+      if (result.success) {
+        await clearAccountError(credentials.connectionId, credentials, model);
+        log.info("VIDEO", `${provider.toUpperCase()} | ${action} accepted (connection ${credentials.connectionId})`);
+        return { ...result, response: withConnectionHeader(result.response, credentials.connectionId) };
       }
-      if (excludeConnectionIds.size === 0) {
-        return errorResponse(HTTP_STATUS.BAD_REQUEST, `No credentials for provider: ${provider}`);
-      }
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
 
-    const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
-
-    const result = await handleVideoProxyCore({
-      provider,
-      action,
-      rawBody: forwardBody,
-      contentType: bodyInfo.contentType || null,
-      idempotencyKey,
-      credentials: refreshedCredentials,
-      signal: request.signal,
-      log,
-      onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          accessToken: newCreds.accessToken,
-          refreshToken: newCreds.refreshToken,
-          providerSpecificData: newCreds.providerSpecificData,
-          testStatus: "active",
-        });
-      },
-    });
-
-    if (result.success) {
-      await clearAccountError(credentials.connectionId, credentials, model);
-      log.info("VIDEO", `${provider.toUpperCase()} | ${action} accepted (connection ${credentials.connectionId})`);
-      return withConnectionHeader(result.response, credentials.connectionId);
-    }
-
-    // Record the failure (dashboard shows lastError/errorCode → user sees re-auth is needed)
-    const { shouldFallback } = await markAccountUnavailable(
-      credentials.connectionId, result.status, sanitizeSecrets(result.error, refreshedCredentials), provider, model
-    );
-
-    if (shouldFallback && CREATE_ROTATION_STATUSES.has(result.status)) {
-      excludeConnectionIds.add(credentials.connectionId);
-      lastError = result.error;
-      lastStatus = result.status;
-      continue;
-    }
-
-    return result.response;
-  }
+      // Secrets are stripped here rather than in the loop, because only this handler's
+      // upstream echoes them back. The loop marks the failure with whatever error text the
+      // attempt returned, so the sanitised text has to be in the result itself.
+      return { ...result, error: sanitizeSecrets(result.error, refreshedCredentials) };
+    },
+    // Creation POSTs are billable jobs. The failure is still recorded on the account, so the
+    // dashboard shows that re-auth is needed, but rotation only happens for statuses upstream
+    // rejects BEFORE creating a job. A 5xx may have created one, so it goes back to the caller
+    // rather than being re-sent to a second account.
+    shouldRotate: (result) => CREATE_ROTATION_STATUSES.has(result.status),
+  });
 }
 
 /**

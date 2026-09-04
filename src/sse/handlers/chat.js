@@ -1,12 +1,17 @@
 import "open-sse/index.js";
 
 import {
-  getProviderCredentials,
-  markAccountUnavailable,
   clearAccountError,
   extractApiKey,
   isValidApiKey,
 } from "../services/auth.js";
+// FORK(attempts): the account walk moved to one shared loop — see accountAttemptLoop.js.
+// markAttemptFailure comes from there too: this is the one site with an onAttemptFailed hook,
+// so it marks the account itself, and the argument shaping has to stay in one place.
+import { runAccountAttempts, markAttemptFailure } from "../services/accountAttemptLoop.js";
+// FORK(smartrouting): conversation identity → the account a conversation stays on.
+import { resolveConversationKey } from "open-sse/utils/sessionManager.js";
+import { resolveBindingKey, sessionFingerprint } from "../services/sessionAffinity.js";
 import { handleAntigravityQuotaError } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
@@ -14,7 +19,7 @@ import { handleChatCore } from "open-sse/handlers/chatCore.js";
 import { DEFAULT_HEADROOM_URL } from "@/lib/headroom/detect";
 import { getTransform as getPxpipeTransform } from "@/lib/pxpipe/loader.js";
 import { appendPxpipeEvent } from "@/lib/pxpipe/events.js";
-import { errorResponse, unavailableResponse } from "open-sse/utils/error.js";
+import { errorResponse } from "open-sse/utils/error.js";
 import { handleComboChat, handleFusionChat, detectRequiredCapabilities } from "open-sse/services/combo.js";
 import { augmentModelsWithCapacityAdapter, withCapacityAdapterStripping, getActiveAdapterStrategy } from "open-sse/services/capacityAdapter.js";
 import { handleBypassRequest } from "open-sse/utils/bypassHandler.js";
@@ -220,113 +225,126 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
   // Extract userAgent from request
   const userAgent = request?.headers?.get("user-agent") || "";
 
+  // FORK(smartrouting): which conversation this request belongs to. **Resolved once per client
+  // request, not per attempt** — the answer must not change while walking accounts. Null is normal
+  // on a first turn and means "serve this, record nothing"; only Smart Routing reads it.
+  const conversationId = resolveConversationKey({ headers: clientRawRequest?.headers, body });
+  const sessionKey = resolveBindingKey(conversationId, model);
+  // FORK(smartlogs): the same identity, reduced to something publishable, for the request record.
+  // **Derived here and nowhere downstream** — open-sse only ever receives the fingerprint, as an
+  // opaque string. Model is not folded in: the record already knows its model, so the
+  // session-and-model pair is reconstructed from the two fields.
+  const sessionTag = sessionFingerprint(conversationId);
+
   // Try with available accounts (fallback on errors)
-  const excludeConnectionIds = new Set();
-  let lastError = null;
-  let lastStatus = null;
+  return runAccountAttempts({
+    provider,
+    lockKey: model,
+    label: `[${provider}/${model}]`,
+    logTag: "CHAT",
+    signal: request?.signal || null,
+    selectOptions: { sessionKey },
+    // Chat answers 404 with its own wording where every other handler answers 400 with
+    // "No credentials". Both preserved rather than unified: changing either is a
+    // client-visible change nobody asked for.
+    noCredentialsStatus: HTTP_STATUS.NOT_FOUND,
+    noCredentialsMessage: `No active credentials for provider: ${provider}`,
+    attempt: async ({ credentials }) => {
+      // Account selection shown in the unified "▶" line (acc:...)
+      const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
 
-  while (true) {
-    const credentials = await getProviderCredentials(provider, excludeConnectionIds, model);
-
-    // All accounts unavailable
-    if (!credentials || credentials.allRateLimited) {
-      if (credentials?.allRateLimited) {
-        const errorMsg = lastError || credentials.lastError || "Unavailable";
-        const status = lastStatus || Number(credentials.lastErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
-        log.warn("CHAT", `[${provider}/${model}] ${errorMsg} (${credentials.retryAfterHuman})`);
-        return unavailableResponse(status, `[${provider}/${model}] ${errorMsg}`, credentials.retryAfter, credentials.retryAfterHuman);
+      // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
+      if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
+        const pid = await getProjectIdForConnection(credentials.connectionId, refreshedCredentials.accessToken, provider);
+        if (pid) {
+          refreshedCredentials.projectId = pid;
+          // Persist to DB in background so subsequent requests have it immediately
+          updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => { });
+        }
       }
-      if (excludeConnectionIds.size === 0) {
-        log.warn("AUTH", `No active credentials for provider: ${provider}`);
-        return errorResponse(HTTP_STATUS.NOT_FOUND, `No active credentials for provider: ${provider}`);
+
+      // Use shared chatCore
+      const chatSettings = await getSettings();
+      const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
+      const result = await handleChatCore({
+        body: { ...body, model: `${provider}/${model}` },
+        modelInfo: { provider, model },
+        credentials: refreshedCredentials,
+        log,
+        clientRawRequest,
+        connectionId: credentials.connectionId,
+        // FORK(smartlogs): opaque, already reduced. Rides to the request record the same way
+        // logDir does — see chatCore's sharedCtx.
+        sessionTag,
+        userAgent,
+        apiKey,
+        ccFilterNaming: !!chatSettings.ccFilterNaming,
+        rtkEnabled: !!chatSettings.rtkEnabled,
+        headroomEnabled: !!chatSettings.headroomEnabled,
+        headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
+        headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
+        headroomTimeoutMs: chatSettings.headroomTimeoutMs,
+        cavemanEnabled: !!chatSettings.cavemanEnabled,
+        cavemanLevel: chatSettings.cavemanLevel || "full",
+        ponytailEnabled: !!chatSettings.ponytailEnabled,
+        ponytailLevel: chatSettings.ponytailLevel || "full",
+        pxpipeEnabled: !!chatSettings.pxpipeEnabled,
+        pxpipeMinChars: chatSettings.pxpipeMinChars,
+        pxpipeTimeoutMs: chatSettings.pxpipeTimeoutMs,
+        // Lazily warms the in-process module on first use; null when not installed (fail-open)
+        pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
+        onPxpipeEvent: appendPxpipeEvent,
+        providerThinking,
+        // Detect source format by endpoint + body
+        sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
+        onCredentialsRefreshed: async (newCreds) => {
+          await updateProviderCredentials(credentials.connectionId, {
+            ...newCreds,
+            existingProviderSpecificData: credentials.providerSpecificData,
+            testStatus: "active"
+          });
+        },
+        onRequestSuccess: async () => {
+          await clearAccountError(credentials.connectionId, credentials, model);
+        }
+      });
+
+      // FORK(attempts): the refreshed access token rides on the result because the Antigravity hook
+      // below runs outside this closure. Attached only on that provider and only on failure.
+      if (!result.success && provider === "antigravity") {
+        return { ...result, antigravityAccessToken: refreshedCredentials.accessToken };
       }
-      log.warn("CHAT", "No more accounts available", { provider });
-      return errorResponse(lastStatus || HTTP_STATUS.SERVICE_UNAVAILABLE, lastError || "All accounts unavailable");
-    }
-
-    // Account selection shown in the unified "▶" line (acc:...)
-    const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
-
-    // Ensure real project ID is available for providers that need it (P0 fix: cold miss)
-    if ((provider === "antigravity" || provider === "gemini-cli") && !refreshedCredentials.projectId) {
-      const pid = await getProjectIdForConnection(credentials.connectionId, refreshedCredentials.accessToken, provider);
-      if (pid) {
-        refreshedCredentials.projectId = pid;
-        // Persist to DB in background so subsequent requests have it immediately
-        updateProviderCredentials(credentials.connectionId, { projectId: pid }).catch(() => { });
+      return result;
+    },
+    // The one site that marks the account itself. Antigravity's quota API can give an exact
+    // per-model resetAt, which is worth fetching before writing any lock — and when it does,
+    // the model is blocked in the RAM cache only, so no modelLock_* is persisted at all. That
+    // is also the one path where no configured lock duration is consulted; see
+    // src/lib/lockPolicy.js.
+    onAttemptFailed: async ({ credentials, result }) => {
+      let quotaResetMs = null;
+      let resetsAtMs = result.resetsAtMs;
+      if (provider === "antigravity" && (result.status === 409 || result.status === 429)) {
+        quotaResetMs = await handleAntigravityQuotaError(
+          credentials.connectionId, result.status, model,
+          result.antigravityAccessToken, credentials.providerSpecificData
+        );
+        if (quotaResetMs) resetsAtMs = quotaResetMs;
       }
-    }
 
-    // Use shared chatCore
-    const chatSettings = await getSettings();
-    const providerThinking = (chatSettings.providerThinking || {})[provider] || null;
-    const result = await handleChatCore({
-      body: { ...body, model: `${provider}/${model}` },
-      modelInfo: { provider, model },
-      credentials: refreshedCredentials,
-      log,
-      clientRawRequest,
-      connectionId: credentials.connectionId,
-      userAgent,
-      apiKey,
-      ccFilterNaming: !!chatSettings.ccFilterNaming,
-      rtkEnabled: !!chatSettings.rtkEnabled,
-      headroomEnabled: !!chatSettings.headroomEnabled,
-      headroomUrl: chatSettings.headroomUrl || DEFAULT_HEADROOM_URL,
-      headroomCompressUserMessages: !!chatSettings.headroomCompressUserMessages,
-      headroomTimeoutMs: chatSettings.headroomTimeoutMs,
-      cavemanEnabled: !!chatSettings.cavemanEnabled,
-      cavemanLevel: chatSettings.cavemanLevel || "full",
-      ponytailEnabled: !!chatSettings.ponytailEnabled,
-      ponytailLevel: chatSettings.ponytailLevel || "full",
-      pxpipeEnabled: !!chatSettings.pxpipeEnabled,
-      pxpipeMinChars: chatSettings.pxpipeMinChars,
-      pxpipeTimeoutMs: chatSettings.pxpipeTimeoutMs,
-      // Lazily warms the in-process module on first use; null when not installed (fail-open)
-      pxpipeTransform: chatSettings.pxpipeEnabled ? await getPxpipeTransform() : null,
-      onPxpipeEvent: appendPxpipeEvent,
-      providerThinking,
-      // Detect source format by endpoint + body
-      sourceFormatOverride: request?.url ? detectFormatByEndpoint(new URL(request.url).pathname, body) : null,
-      onCredentialsRefreshed: async (newCreds) => {
-        await updateProviderCredentials(credentials.connectionId, {
-          ...newCreds,
-          existingProviderSpecificData: credentials.providerSpecificData,
-          testStatus: "active"
-        });
-      },
-      onRequestSuccess: async () => {
-        await clearAccountError(credentials.connectionId, credentials, model);
-      }
-    });
+      if (provider === "antigravity" && quotaResetMs) return { shouldFallback: true };
 
-    if (result.success) return result.response;
-
-    // Antigravity 409/429: refresh live quota to get exact resetAt before locking
-    let quotaResetMs = null;
-    let resetsAtMs = result.resetsAtMs;
-    if (provider === "antigravity" && (result.status === 409 || result.status === 429)) {
-      quotaResetMs = await handleAntigravityQuotaError(
-        credentials.connectionId, result.status, model,
-        refreshedCredentials.accessToken, credentials.providerSpecificData
-      );
-      if (quotaResetMs) resetsAtMs = quotaResetMs;
-    }
-
-    // Exhausted Antigravity model is blocked only in RAM cache until upstream resetAt.
-    // Do not persist a modelLock_* for this path.
-    const shouldFallback = provider === "antigravity" && quotaResetMs
-      ? true
-      : (await markAccountUnavailable(credentials.connectionId, result.status, result.error, provider, model, resetsAtMs)).shouldFallback;
-
-    if (shouldFallback) {
-      log.warn("FALLBACK", `⇄ ACC:${credentials.connectionName} UNAVAILABLE (${result.status}) → NEXT ACCOUNT`);
-      excludeConnectionIds.add(credentials.connectionId);
-      lastError = result.error;
-      lastStatus = result.status;
-      continue;
-    }
-
-    return result.response;
-  }
+      // Through the shared helper so the optional-argument shaping lives in one place — see
+      // markAttemptFailure for why the argument count matters.
+      return markAttemptFailure({
+        connectionId: credentials.connectionId,
+        status: result.status,
+        errorText: result.error,
+        provider,
+        lockKey: model,
+        resetsAtMs,
+        errorSignals: result.errorSignals,
+      });
+    },
+  });
 }

@@ -1,36 +1,25 @@
 #!/usr/bin/env node
-// Fork tooling: runs the greps in the "Upstream merge checklist" section of
-// FORK-CHANGES.md and reports one line per item.
+// Fork tooling: asserts that every fork mechanism upstream could quietly break is still intact,
+// one line per item. Run it after resolving an upstream merge.
 //
-// Carries no FORK(<feature>) tag on purpose. The tag exists so one grep returns a
-// feature's whole footprint, and this file belongs to no feature — same reason
-// FORK-CHANGES.md has none. It also sits outside that grep's `open-sse src` scope, so
-// tagging it would not change the inventory count either way. It is listed in the
-// document's Added table instead, which is the only record of both untagged files.
+// Carries no FORK(<feature>) tag: it belongs to no feature, and it sits outside the tag grep's
+// `open-sse src` scope anyway. FORK-CHANGES.md's Added table is its record.
 //
-// Why this exists: the checklist is twenty-six items and most of them are a grep with
-// an expected count. Running them by hand is twenty-six chances to skip the one that
-// mattered, and the quoted commands are POSIX spellings that need translating on
-// Windows (`sort -u`, and PowerShell expanding the `[id]` in a path as a character
-// class). Node is already a dependency and behaves the same either way.
+// **This script owns the expected numbers — FORK-CHANGES.md deliberately quotes none.** When
+// upstream legitimately moves a count, this file is the only place to update.
 //
-// This script does NOT replace FORK-CHANGES.md. It answers "did anything move?" and
-// nothing else — every repair, every reason, and the four items that can only be
-// settled by reading code live in the document. A FAIL here is an instruction to go
-// read that item, not a diagnosis.
+// Six items assert an ORDERING or an ABSENCE rather than a count and cannot be satisfied by
+// editing a number: 25, 29, 30, 31, 32 and 34. A failure there means something behavioural moved.
+// Read item 32 first if it ever fails — it is the only assertion whose breakage is both silent and
+// behavioural: nothing errors, no count moves, the page keeps rendering, and the session idle
+// window simply stops expiring.
 //
-// Deliberately NOT covered, because none of it is a grep: the "Verifying" section
-// (lint, build, the test comparison) and the eleven-step post-merge check against a
-// running instance. A clean run here is necessary and not sufficient.
+// **Some checks count identifiers in comments as well as code** (items 20, 24 and 33 among them),
+// so editing prose near those identifiers can move a count. Item 1 shows the alternative: it runs
+// its source through stripComments first.
 //
-// Maintaining it: the expected numbers below are the same assertions as the ones in
-// the document, so the two must move together. Checklist item 25 is the rule — when
-// upstream legitimately changes a count, update both. Nothing detects a disagreement
-// between this file and the markdown.
-//
-// Adding a feature shifts the tail: feature items go before the all-features and
-// procedural ones, so the ids to fix here are the `MANUAL_ITEMS` entries, the item
-// count in the line above, and the per-feature array inside the all-features check.
+// Not covered here, because none of it is a grep: lint, build, the test comparison, and any
+// behavioural check against a running instance. A clean run is necessary, not sufficient.
 //
 // Usage:
 //   node scripts/fork-check.mjs            one line per item
@@ -75,6 +64,20 @@ function readRepoFile(relPath) {
 }
 
 /**
+ * Strip comments so a structural check reads code rather than prose.
+ *
+ * Required, not defensive: the comment above the Smart Routing branch explains why there is no
+ * `await` in it — using the word `await` — and a raw count reported the branch as broken while the
+ * code was correct. **Any structural assertion added here has the same exposure.**
+ *
+ * Not a parser. A `//` inside a string literal is over-removed, which cannot produce a false PASS:
+ * every caller asserts on the presence of code, so losing text only makes a check stricter.
+ */
+function stripComments(source) {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
+/**
  * Evaluate the millisecond expressions in errorConfig.js without eval.
  *
  * They are all plain integer products (`30 * 1000`, `2 * 60 * 1000`). Anything else
@@ -89,17 +92,26 @@ function evalMsProduct(expr) {
 
 const check = (id, tag, title, fn) => ({ id, tag, title, fn });
 
-// Item order matches FORK-CHANGES.md's checklist exactly, so a FAIL maps to a section
-// by number with nothing to look up.
+// Each item is self-describing: its title says what is asserted and the comment above it says what
+// breaks if the assertion stops holding. Grouped by feature tag, in the order the features landed.
 const CHECKS = [
   check(1, "logs", "logDir survives the whole thread", () => {
     const scope = ["--", "open-sse/handlers", "src/lib/db/repos/requestDetailsRepo.js"];
     const lines = gitGrep(["-n", "logDir", ...scope]);
     const files = new Set(lines.map((l) => l.split(":")[0]));
+    // CODE hits only. The prose is excluded because this fork documents its reasoning beside
+    // the code it constrains, so `logDir` is named in comments too — including one belonging to
+    // another feature, where the sessionTag docblock explains that the field rides along the
+    // same way. Counting raw hits made an unrelated comment edit look like a lost field.
+    const code = lines.filter((l) => !/^[^:]+:\d+:\s*(\/\/|\*|\/\*)/.test(l));
     // Scope is narrow on purpose: a wider `-- open-sse` also matches an unrelated
     // local variable in transformer/responsesTransformer.js.
-    const ok = lines.length === 17 && files.size === 6;
-    return { ok, detail: `${lines.length} hits / ${files.size} files (expect 17 / 6)`, lines };
+    const ok = code.length === 13 && files.size === 6;
+    return {
+      ok,
+      detail: `${code.length} code hits / ${files.size} files (expect 13 / 6); ${lines.length - code.length} comment mentions ignored`,
+      lines,
+    };
   }),
 
   check(2, "logs", "maskSensitiveHeaders applied at every write site", () => {
@@ -446,24 +458,359 @@ const CHECKS = [
     };
   }),
 
-  check(24, "all", "the fork inventory is complete", () => {
-    // The bare prefix, not one feature's tag: three files carry more than one tag, so
-    // per-feature greps overlap and none of them is the whole fork. The sum exceeds the
-    // file count by FIVE, not three: a two-tag file adds one and a three-tag file adds
-    // two, and there is one of the former and two of the latter.
+  check(24, "smartrouting", "the errorSignals thread survives end to end", () => {
+    // parseUpstreamError is the last place in the request path holding the upstream
+    // Response, so it is the only place a header can be captured. A break anywhere along
+    // the thread is silent: classification degrades to status + message, still returns a
+    // plausible weight, and nothing reports the header signal went missing. Every value on
+    // the thread is an object or undefined, so a dropped forward is not a type error.
+    const lines = gitGrep(["-n", "--untracked", "errorSignals", "--", "open-sse", "src"]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    const ok = lines.length === 28 && files.size === 8;
+    return {
+      ok,
+      detail: `${lines.length} hits / ${files.size} files (expect 28 / 8)`,
+      lines,
+    };
+  }),
+
+  check(25, "smartrouting", "the Smart Routing branch is await-free and inside the mutex", () => {
+    // The concurrency argument is that there is no asynchronous wait between reading
+    // shared state and writing it — which holds only because the runtime is
+    // single-threaded. One await inside the branch reintroduces the race with no symptom
+    // beyond load distribution degrading under concurrency, so this is asserted
+    // structurally rather than by counting anything.
+    const src = readRepoFile("src/sse/services/auth.js");
+
+    const start = src.indexOf("} else if (strategy === ROUTING_STRATEGY.SMART) {");
+    if (start === -1) {
+      return { ok: false, detail: "SMART branch NOT FOUND — the strategy chain was restructured", lines: [] };
+    }
+
+    // Walk braces from the branch's opening `{` to find its matching close, rather than
+    // regexing to the next `}` — the body contains nested blocks.
+    const open = src.indexOf("{", start);
+    let depth = 0;
+    let end = -1;
+    for (let i = open; i < src.length; i += 1) {
+      if (src[i] === "{") depth += 1;
+      else if (src[i] === "}") {
+        depth -= 1;
+        if (depth === 0) { end = i; break; }
+      }
+    }
+    // Comments stripped first: the branch's own docblock explains why there is no await by
+    // using the word, so a raw count reports a correct branch as broken.
+    const body = end === -1 ? "" : stripComments(src.slice(open, end));
+    const awaits = (body.match(/\bawait\b/g) || []).length;
+
+    // Position: upstream's round-robin branch must come before it and the fill-first
+    // `else` after it, which is what keeps the branch inside selectionMutex.
+    const roundRobin = src.indexOf('} else if (strategy === "round-robin") {');
+    const fillFirst = src.indexOf("// Default: fill-first");
+    const positioned = roundRobin !== -1 && fillFirst !== -1 && roundRobin < start && start < fillFirst;
+
+    const ok = awaits === 0 && positioned;
+    return {
+      ok,
+      detail: `${awaits} await(s) in the branch (expect 0); ${positioned ? "positioned between round-robin and fill-first" : "NO LONGER between round-robin and fill-first — check it is still inside selectionMutex"}`,
+      lines: awaits ? [body.split("\n").find((l) => /\bawait\b/.test(l))?.trim() ?? ""] : [],
+    };
+  }),
+
+  check(26, "smartrouting", "the two persisted field prefixes have one home", () => {
+    // A second literal is how a reader and a writer end up disagreeing about a field name
+    // that looks right in both. auth.js logs a demotion by testing
+    // `demotedAtKey(lockScope) in scoreUpdate`, which is why it contributes nothing here.
+    const lines = gitGrep(["-n", "--untracked", "smartErrorScore_\\|smartDemotedAt_", "--", "open-sse", "src"]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    const onlyHome = files.size === 1 && files.has("src/lib/smartRouting.js");
+    const ok = lines.length === 2 && onlyHome;
+    return {
+      ok,
+      detail: `${lines.length} hits / ${files.size} files (expect 2 / 1, in src/lib/smartRouting.js)`,
+      lines,
+    };
+  }),
+
+  check(27, "smartrouting", "resolveConversationKey still stops after two tiers", () => {
+    // If it ever falls through to workspaceId or deriveSessionId(connectionId) the answer
+    // becomes keyed on the ACCOUNT — and asking "which conversation is this?" in order to
+    // decide which account to use would then be answered with the account.
+    const src = readRepoFile("open-sse/utils/sessionManager.js");
+    const body = src.match(/export function resolveConversationKey[\s\S]*?\n}/);
+    if (!body) {
+      return { ok: false, detail: "resolveConversationKey NOT FOUND", lines: [] };
+    }
+    const required = ["extractClientSessionId", "assistantTextSessionId"];
+    const forbidden = ["workspaceId", "deriveSessionId"];
+    const missing = required.filter((n) => !body[0].includes(n));
+    const leaked = forbidden.filter((n) => body[0].includes(n));
+    const ok = missing.length === 0 && leaked.length === 0;
+    return {
+      ok,
+      detail: `${missing.length ? `MISSING: ${missing.join(", ")}` : "both tiers present"}; ${leaked.length ? `ACCOUNT-KEYED FALLBACK PRESENT: ${leaked.join(", ")}` : "no account-keyed fallback"} — ASSISTANT_MIN_LEN/ASSISTANT_CAP_LEN still need reading`,
+      lines: [],
+    };
+  }),
+
+  check(28, "smartrouting", "the smart-routing value is written once", () => {
+    // Upstream compares `strategy === "round-robin"` and treats everything else as
+    // fill-first, so a typo'd or duplicated third value does not error — it silently
+    // selects fill-first and Smart Routing appears to do nothing.
+    //
+    // Counted in CODE only. Comments name the value on purpose — several explain what a
+    // stored `smart-routing` does to a control that cannot represent it — and a raw grep
+    // counts those, which reported three hits while there was still exactly one literal.
+    // Same trap as item 25, and it fired here for the same reason.
+    //
+    // Matched as a COMPLETE quoted string, not as a substring. The Smart Logs routes live at
+    // `/api/logs/smart-routing`, so the same characters now appear inside URL strings that have
+    // nothing to do with the stored value. A substring count read those as duplicate literals
+    // and turned a passing item into four phantom failures. The strategy value is always the
+    // whole string; a path never is.
+    const candidates = gitGrep(["-l", "--untracked", "-F", "smart-routing", "--", "open-sse", "src"]);
+    const inCode = [];
+    for (const file of candidates) {
+      const code = stripComments(readRepoFile(file));
+      const n = (code.match(/(["'`])smart-routing\1/g) || []).length;
+      for (let i = 0; i < n; i += 1) inCode.push(file);
+    }
+    const files = new Set(inCode);
+    const ok = inCode.length === 1 && files.has("src/lib/routingStrategy.js");
+    return {
+      ok,
+      detail: `${inCode.length} literal(s) in code across ${files.size} file(s) (expect 1, in src/lib/routingStrategy.js); ${candidates.length} file(s) mention it including comments`,
+      lines: inCode,
+    };
+  }),
+
+  check(29, "attempts", "all nine account walks go through the shared loop", () => {
+    // A handler that reinstates a local `while (true)` walk works perfectly and silently
+    // opts out of the ceilings, the malformed-request stop and the disconnect stop. This is
+    // the only thing that would notice.
+    const walks = gitGrep(["-n", "--untracked", "-F", "while (true)", "--", "src/sse/handlers", "src/app/api"]);
+    const callers = gitGrep(["-l", "--untracked", "runAccountAttempts", "--", "open-sse", "src"]);
+
+    // getProviderCredentials must have exactly one CALL outside the loop — handleVideoGet,
+    // deliberately a single attempt because video jobs are account-bound upstream. Comment
+    // mentions are excluded by requiring the open paren after an await.
+    const selectHits = gitGrep(["-n", "--untracked", "getProviderCredentials", "--", "src/sse/handlers", "src/app/api"]);
+    const realCalls = selectHits.filter((l) => /await getProviderCredentials\(/.test(l));
+
+    const ok = walks.length === 0 && callers.length === 10 && realCalls.length === 1;
+    return {
+      ok,
+      detail: `${walks.length} local while(true) walks (expect 0); ${callers.length} files reference runAccountAttempts (expect 10 — nine callers plus the loop); ${realCalls.length} direct getProviderCredentials call outside the loop (expect 1 — handleVideoGet)`,
+      lines: [...walks, ...realCalls],
+    };
+  }),
+
+  check(30, "attempts", "markAttemptFailure still appends optional arguments conditionally", () => {
+    // Upstream tests assert markAccountUnavailable with toHaveBeenCalledWith and FIVE
+    // arguments, and that matcher compares the whole list — a trailing null makes it six
+    // and fails them even though the value is equivalent. The fork edits no upstream test
+    // file, so the caller is the side that moves. Nothing static sees this failure: the
+    // code is correct, the values are equivalent, and the build passes.
+    const src = readRepoFile("src/sse/services/accountAttemptLoop.js");
+    const body = src.match(/export function markAttemptFailure[\s\S]*?\n}/);
+    if (!body) {
+      return { ok: false, detail: "markAttemptFailure NOT FOUND", lines: [] };
+    }
+    // A five-element array first, then conditional pushes.
+    const buildsFive = /const args = \[connectionId, status, errorText, provider, lockKey\]/.test(body[0]);
+    const conditional = /if \(resetsAtMs != null \|\| errorSignals != null\)/.test(body[0])
+      && /if \(errorSignals != null\) args\.push\(errorSignals\)/.test(body[0]);
+    const spread = /markAccountUnavailable\(\.\.\.args\)/.test(body[0]);
+
+    // And it must stay the only route to markAccountUnavailable outside auth.js itself.
+    //
+    // Matched WITH the open paren, so a bare mention in prose does not register — several
+    // handlers explain in comments why their lock key is what it is and name the function
+    // while doing it. Import lines have no paren either, which is the same result for the
+    // same reason.
+    const callSites = gitGrep(["-n", "--untracked", "markAccountUnavailable(", "--", "src/sse", "src/app/api"]);
+    const expected = [
+      "src/sse/services/auth.js",              // the definition
+      "src/sse/services/accountAttemptLoop.js", // markAttemptFailure's single call
+      "src/sse/handlers/videoGeneration.js",    // handleVideoGet, deliberately one attempt
+    ];
+    const unexpected = [...new Set(callSites.map((l) => l.split(":")[0]))].filter((f) => !expected.includes(f));
+
+    const ok = buildsFive && conditional && spread && unexpected.length === 0;
+    return {
+      ok,
+      detail: `${buildsFive && conditional && spread ? "five-arg base with conditional pushes intact" : "SHAPING CHANGED — upstream's 5-arg assertions will fail"}; ${unexpected.length ? `unexpected callers: ${unexpected.join(", ")}` : "no caller outside auth.js, the loop and handleVideoGet"}`,
+      lines: unexpected,
+    };
+  }),
+
+  check(31, "attempts", "the malformed-request check runs before the account is marked", () => {
+    // Both halves matter. Classify first and the failure is already labelled transient, too
+    // late to act on. Mark first and the request stops correctly but an account has been
+    // locked for a fault that was never its own. Positional because it is an ordering claim
+    // and no count can express one.
+    const src = readRepoFile("src/sse/services/accountAttemptLoop.js");
+    const loop = src.slice(src.indexOf("while (true) {"));
+    const badRequestAt = loop.indexOf("isBadRequest(");
+    const hookAt = loop.indexOf("onAttemptFailed");
+    const markAt = loop.indexOf("markAttemptFailure({");
+    const ordered = badRequestAt !== -1 && badRequestAt < hookAt && badRequestAt < markAt;
+
+    // And the detection must stay POSITIVE: an unrecognised 400 returns false. Inverted,
+    // every situation not yet on the list disables failover.
+    const policy = readRepoFile("src/lib/errorPolicy.js");
+    const fn = policy.match(/export function isBadRequest[\s\S]*?\n}/);
+    const positive = fn
+      ? /return \(\s*matchesAny/.test(fn[0]) && !/return true;/.test(fn[0])
+      : false;
+
+    // No provider's generic error TYPE may appear in the phrase lists. One of these was in
+    // INVALID_PARAMETER_PHRASES and turned positive detection into "every 400 is broken":
+    // six real bodies classified as bad requests, model-access denial and
+    // organization-verification among them, both of which another connection may serve. A type
+    // name says nothing about whether the request is malformed, so it can never belong.
+    // Scoped to the phrase-list region so the explanatory comments above it, which name the
+    // offender on purpose, do not trip the check.
+    const listsRegion = stripComments(
+      policy.slice(policy.indexOf("const CREDIT_PHRASES"), policy.indexOf("const STRUCTURED_HEAVY"))
+    );
+    const typeNames = ["invalid_request_error", "invalid_request", "api_error"];
+    const leaked = typeNames.filter((name) => listsRegion.includes(`"${name}"`));
+
+    const ok = ordered && positive && leaked.length === 0;
+    return {
+      ok,
+      detail: `${ordered ? "isBadRequest precedes both marking paths" : "ORDERING BROKEN — a malformed request will lock an account"}; ${positive ? "detection still positive" : "detection NO LONGER positive — an unrecognised 400 now disables failover"}; ${leaked.length ? `GENERIC TYPE NAME IN A PHRASE LIST: ${leaked.join(", ")} — remove it, do not add a carve-out` : "no generic type name in the phrase lists"}`,
+      lines: leaked,
+    };
+  }),
+
+  check(32, "smartlogs", "the display read still never refreshes a binding", () => {
+    // The only assertion in this list whose failure is both SILENT and BEHAVIOURAL. Nothing
+    // errors, no count moves, the page keeps rendering — the thirty-minute idle window simply
+    // stops expiring for anyone who leaves the tab open, because the display read starts
+    // extending the bindings it reports.
+    const src = readRepoFile("src/sse/services/sessionAffinity.js");
+
+    const snapshot = src.match(/export function snapshotBindings[\s\S]*?\n}/);
+    if (!snapshot) {
+      return { ok: false, detail: "snapshotBindings NOT FOUND", lines: [] };
+    }
+    // Comments stripped: the docblock explains at length what it must not do, naming the field.
+    const snapshotBody = stripComments(snapshot[0]);
+    const writes = /\blastSeen\s*=/.test(snapshotBody) || /entry\.lastSeen\s*=/.test(snapshotBody);
+
+    // The contrast is half the assertion. The routing read MUST still refresh — the idle window
+    // is measured from the last request, and that is the read which measures it. If both stop
+    // refreshing, sessions expire while still in use.
+    const routing = src.match(/export function getBoundConnectionId[\s\S]*?\n}/);
+    const routingRefreshes = routing ? /lastSeen\s*=\s*now/.test(stripComments(routing[0])) : false;
+
+    const ok = !writes && routingRefreshes;
+    return {
+      ok,
+      detail: `${writes ? "snapshotBindings WRITES lastSeen — the window will stop expiring" : "snapshotBindings does not write lastSeen"}; ${routingRefreshes ? "getBoundConnectionId still refreshes" : "getBoundConnectionId NO LONGER refreshes — sessions will expire while in use"}`,
+      lines: [],
+    };
+  }),
+
+  check(33, "smartlogs", "the sessionTag thread survives end to end", () => {
+    // Same shape and same silence as item 1: every value on the thread is a string or
+    // undefined, so a dropped forward is not a type error — the session column just empties.
+    //
+    // The streaming count is the subtle one. A streaming row is upserted twice under one id, so
+    // a field on only the first write is erased by the second, and the symptom is a column that
+    // populates and then blanks a few seconds later.
+    // Scoped to the THREAD — producer, carriers, store — and deliberately not to `src/app`.
+    // The page and the sessions route read the field by name too, and counting them would mean
+    // every new consumer had to come back and edit this number, which is how a count stops
+    // being an assertion and becomes a chore. The thread is what has to stay intact; the
+    // consumers are free to multiply.
+    const scope = ["--", "open-sse", "src/sse", "src/lib/db"];
+    const lines = gitGrep(["-n", "--untracked", "sessionTag", ...scope]);
+    const files = new Set(lines.map((l) => l.split(":")[0]));
+    const streaming = lines.filter((l) => l.startsWith("open-sse/handlers/chatCore/streamingHandler.js"));
+    const ok = lines.length === 20 && files.size === 8 && streaming.length === 4;
+    return {
+      ok,
+      detail: `${lines.length} hits / ${files.size} files on the thread (expect 20 / 8); ${streaming.length} in streamingHandler (expect 4 — two signatures and two record calls)`,
+      lines,
+    };
+  }),
+
+  check(34, "smartlogs", "no raw session id leaves the process", () => {
+    // Tier-1 session ids come from the client, and isAuthenticated() passes everyone once
+    // requireLogin is off, so a raw value on a screen or in a stored record publishes whatever
+    // the client sent. Only sessionFingerprint's output may travel.
+    const affinity = readRepoFile("src/sse/services/sessionAffinity.js");
+
+    // One hashing site, and it is the fingerprint. A second one is a second transformation,
+    // which gives one conversation two tags and silently breaks the card-to-row matching.
+    const hashSites = (stripComments(affinity).match(/createHash\(/g) || []).length;
+
+    // The snapshot must expose the tag, never the map key it derived it from.
+    const snapshot = affinity.match(/export function snapshotBindings[\s\S]*?\n}/);
+    const exposesTag = snapshot ? /sessionTag:\s*sessionFingerprint\(/.test(snapshot[0]) : false;
+
+    // bindingKey is file-local on purpose. A route or component reaching for it would be
+    // reaching for the raw id.
+    const keyLeak = gitGrep(["-l", "--untracked", "bindingKey", "--", "src/app", "open-sse"]);
+
+    const ok = hashSites === 1 && exposesTag && keyLeak.length === 0;
+    return {
+      ok,
+      detail: `${hashSites} hashing site(s) in sessionAffinity (expect 1, in sessionFingerprint); snapshot ${exposesTag ? "exposes the fingerprint" : "NO LONGER exposes sessionFingerprint's output"}; ${keyLeak.length ? `bindingKey referenced outside the module: ${keyLeak.join(", ")}` : "bindingKey stays file-local"} — the "one definition" half still needs reading`,
+      lines: keyLeak,
+    };
+  }),
+
+  check(35, "smartlogs", "the strategy precedence has one home", () => {
+    // Three readers now: the selection path, the provider tiles and the detail endpoint. A
+    // second copy of a two-branch precedence drifts — the day it changes, the page lists the
+    // wrong providers and nothing fails.
+    //
+    // Structural rather than a bare grep, because the obvious pattern does not work: `combos`
+    // owns an unrelated field also called `fallbackStrategy`, so matching the `||` chain finds
+    // four files that have nothing to do with account selection. What identifies a re-inlined
+    // copy is chaining the field to ITSELF — override first, then the global — so that is what
+    // is counted, inside the selection and API scope where such a copy would matter.
+    const src = readRepoFile("src/lib/routingStrategy.js");
+    const fn = src.match(/export function resolveProviderStrategy[\s\S]*?\n}/);
+    const holdsPrecedence = fn
+      ? /override\.fallbackStrategy\s*\|\|\s*settings\?\.fallbackStrategy\s*\|\|/.test(stripComments(fn[0]))
+      : false;
+
+    const scope = ["--", "open-sse", "src/sse", "src/lib", "src/app/api"];
+    const chains = gitGrep(["-n", "--untracked", "fallbackStrategy.*fallbackStrategy", ...scope]);
+    const files = new Set(chains.map((l) => l.split(":")[0]));
+
+    const ok = holdsPrecedence && chains.length === 1 && files.has("src/lib/routingStrategy.js");
+    return {
+      ok,
+      detail: `${holdsPrecedence ? "resolveProviderStrategy still holds the override-then-global chain" : "resolveProviderStrategy NO LONGER holds the precedence — it moved or was rewritten"}; ${chains.length} chain(s) in the selection scope (expect 1, in src/lib/routingStrategy.js)`,
+      lines: chains,
+    };
+  }),
+
+  check(36, "all", "the fork inventory is complete", () => {
+    // The bare prefix, not one feature's tag: nineteen files carry more than one tag, so
+    // per-feature greps overlap and none of them is the whole fork. DERIVE the sum from the
+    // tag counts, never from the number of shared files — the excess is TWENTY-SIX across
+    // nineteen files, because thirteen carry two tags, five carry three and one carries four.
     const files = gitGrep(["-l", "--untracked", "FORK(", "--", "open-sse", "src"]);
     const perFeature = Object.fromEntries(
-      ["logs", "locks", "conntest", "tokenstat"].map((f) => [
+      ["logs", "locks", "conntest", "tokenstat", "smartrouting", "attempts", "smartlogs"].map((f) => [
         f,
         gitGrep(["-l", "--untracked", `FORK(${f})`, "--", "open-sse", "src"]).length,
       ])
     );
     const sum = Object.values(perFeature).reduce((a, b) => a + b, 0);
-    const ok = files.length === 28 && sum === 33;
+    const ok = files.length === 59 && sum === 85;
     const counts = Object.entries(perFeature).map(([f, n]) => `${f}=${n}`).join(" ");
     return {
       ok,
-      detail: `${files.length} tagged files (expect 28); ${counts}, sum=${sum} (expect 33 — one file carries two tags, two carry three)`,
+      detail: `${files.length} tagged files (expect 59); ${counts}, sum=${sum} (expect 85 — nineteen files carry more than one tag)`,
       lines: files,
     };
   }),
@@ -471,11 +818,18 @@ const CHECKS = [
 
 // Items the document deliberately settles by reading rather than counting. Listed so a
 // clean run cannot be mistaken for a complete one.
+//
+// Item 27 is here as well as in CHECKS: its structural half is automated, but the part that
+// actually decides behaviour — upstream's ASSISTANT_MIN_LEN and ASSISTANT_CAP_LEN, which
+// govern which conversations get a fingerprint and how stable it stays — is a pair of numbers
+// no assertion here can judge.
 const MANUAL_ITEMS = [
   [4, "logs", "parseSessionName vs createLogSession: the name screen must stay a deny-list, and the stamp local-time"],
   [7, "logs", "truncateField must keep returning a new value instead of mutating its argument"],
   [17, "locks", "buildClearModelLocksUpdate must still enumerate modelLock_* by prefix, not from a fixed list"],
   [23, "tokenstat", "buildRefreshAttempt must keep bounding classification and providerCode through reduceDetail — GET /api/providers publishes both"],
+  [27, "smartrouting", "ASSISTANT_MIN_LEN and ASSISTANT_CAP_LEN in sessionManager.js still decide which conversations get a fingerprint — retuning either silently changes affinity coverage"],
+  [34, "smartlogs", "sessionFingerprint must stay the ONE transformation — the session cards and the log rows are matched by eye, so a second one gives a conversation two tags and breaks the matching with nothing failing"],
 ];
 
 function main() {
@@ -508,13 +862,15 @@ function main() {
   console.log(`\n${results.length - failed.length} pass, ${failed.length} fail, ${MANUAL_ITEMS.length} to read`);
 
   if (failed.length) {
-    console.log(`\nRead these items in FORK-CHANGES.md: ${failed.map((r) => r.id).join(", ")}.`);
-    console.log("A count that moved for a legitimate upstream change is not a failure — confirm");
-    console.log("the new shape, then update the number in BOTH this script and the document");
-    console.log("(checklist item 25). Re-run with --verbose to see the matched lines.");
+    console.log(`\nRead the comment above each failed item in this file: ${failed.map((r) => r.id).join(", ")}.`);
+    console.log("A count that moved for a legitimate upstream change is not a failure — confirm the");
+    console.log("new shape, then update the number here. This script is the only place it lives.");
+    console.log("Re-run with --verbose to see the matched lines.");
+    console.log("Items 25, 29, 30, 31, 32 and 34 are the exception — they assert an ordering or an");
+    console.log("absence, so a failure there means behaviour moved, not that a number is stale.");
   } else {
-    console.log(`\nStill to do by hand: the ${MANUAL_ITEMS.length} items above, then Verifying (lint, build,`);
-    console.log("the test comparison) and the eleven-step post-merge check. None of those is a grep.");
+    console.log(`\nStill to do by hand: the ${MANUAL_ITEMS.length} items above, then build, lint and the`);
+    console.log("test comparison — see \"Verifying a merge\" in FORK-CHANGES.md. None of those is a grep.");
   }
 
   process.exit(failed.length ? 1 : 0);

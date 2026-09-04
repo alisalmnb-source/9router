@@ -155,10 +155,11 @@ export async function handleImageGenerationCore({
   }
 
   if (!providerResponse.ok) {
-    const { statusCode, message } = await parseUpstreamError(providerResponse);
+    // FORK(smartrouting): errorSignals forwarded — see createErrorResult in utils/error.js.
+    const { statusCode, message, errorSignals } = await parseUpstreamError(providerResponse);
     const errMsg = formatProviderError(new Error(message), provider, model, statusCode);
     log?.debug?.("IMAGE", `Provider error: ${errMsg}`);
-    return createErrorResult(statusCode, errMsg);
+    return createErrorResult(statusCode, errMsg, undefined, errorSignals);
   }
 
   // Parse provider response — adapter may override (codex SSE / async polling / binary)

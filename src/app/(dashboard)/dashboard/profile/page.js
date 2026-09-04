@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
-import { Card, Button, Toggle, Input } from "@/shared/components";
+import { Card, Button, Toggle, Input, Select } from "@/shared/components";
 import Modal, { ConfirmModal } from "@/shared/components/Modal";
 import LanguageSwitcher from "@/shared/components/LanguageSwitcher";
 import { useTheme } from "@/shared/hooks/useTheme";
@@ -12,6 +12,11 @@ import { LOCALE_FLAGS } from "@/shared/constants/locales";
 // FORK(locks): self-contained — reads and writes /api/settings itself, so this page
 // only gains an import and the render line below.
 import LockDurationsCard from "./components/LockDurationsCard";
+// FORK(attempts): same pattern.
+import AttemptLimitsCard from "./components/AttemptLimitsCard";
+// FORK(smartrouting): the option list is shared with the per-provider control so the two
+// cannot offer different strategies.
+import { ROUTING_STRATEGY, ROUTING_STRATEGY_OPTIONS } from "@/lib/routingStrategy";
 
 function getLocaleFromCookie() {
   if (typeof document === "undefined") return "en";
@@ -1441,22 +1446,37 @@ export default function ProfilePage() {
             <h3 className="text-base sm:text-lg font-semibold">Routing Strategy</h3>
           </div>
           <div className="flex flex-col gap-4">
-            <div className="flex items-start sm:items-center justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <p className="font-medium text-sm sm:text-base">Round Robin</p>
-                <p className="text-xs sm:text-sm text-text-muted">
-                  Cycle through accounts to distribute load
-                </p>
+            {/*
+              FORK(smartrouting): was a Round Robin on/off toggle. A third strategy does not fit
+              on a toggle, so this is a list. Fill First and Round Robin keep their exact
+              behaviour and their stored values, so an existing install reads back unchanged.
+            */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-start sm:items-center justify-between gap-4">
+                <div className="flex-1 min-w-0">
+                  <p className="font-medium text-sm sm:text-base">Account Strategy</p>
+                  <p className="text-xs sm:text-sm text-text-muted">
+                    How a request picks which account serves it
+                  </p>
+                </div>
+                <Select
+                  options={ROUTING_STRATEGY_OPTIONS.map(({ value, label }) => ({ value, label }))}
+                  value={settings.fallbackStrategy || ROUTING_STRATEGY.FILL_FIRST}
+                  onChange={(e) => updateFallbackStrategy(e.target.value)}
+                  disabled={loading}
+                  className="w-44 sm:w-56 shrink-0"
+                  selectClassName="py-2 text-sm"
+                />
               </div>
-              <Toggle
-                checked={settings.fallbackStrategy === "round-robin"}
-                onChange={() => updateFallbackStrategy(settings.fallbackStrategy === "round-robin" ? "fill-first" : "round-robin")}
-                disabled={loading}
-              />
+              <p className="text-xs text-text-muted">
+                {ROUTING_STRATEGY_OPTIONS.find(
+                  (option) => option.value === (settings.fallbackStrategy || ROUTING_STRATEGY.FILL_FIRST)
+                )?.hint}
+              </p>
             </div>
 
             {/* Sticky Round Robin Limit */}
-            {settings.fallbackStrategy === "round-robin" && (
+            {settings.fallbackStrategy === ROUTING_STRATEGY.ROUND_ROBIN && (
               <div className="flex items-start sm:items-center justify-between gap-4 pt-2 border-t border-border/50">
                 <div className="flex-1 min-w-0">
                   <p className="font-medium text-sm sm:text-base">Sticky Limit</p>
@@ -1512,10 +1532,13 @@ export default function ProfilePage() {
               </div>
             )}
 
+            {/* FORK(smartrouting): a third sentence added for the third strategy. */}
             <p className="text-xs text-text-muted italic pt-2 border-t border-border/50">
-              {settings.fallbackStrategy === "round-robin"
+              {settings.fallbackStrategy === ROUTING_STRATEGY.ROUND_ROBIN
                 ? `Currently distributing requests across all available accounts with ${settings.stickyRoundRobinLimit || 3} calls per account.`
-                : "Currently using accounts in priority order (Fill First)."}
+                : settings.fallbackStrategy === ROUTING_STRATEGY.SMART
+                  ? "Currently ordering accounts by conversations carried, then by how recently each one failed, then by priority. A conversation stays on its account for 30 minutes of inactivity. Not offered for media providers."
+                  : "Currently using accounts in priority order (Fill First)."}
               {settings.comboStrategy === "round-robin"
                 ? ` Combos rotate after ${settings.comboStickyRoundRobinLimit || 1} call${(settings.comboStickyRoundRobinLimit || 1) === 1 ? "" : "s"} per model.`
                 : " Combos always start with their first model."}
@@ -1620,6 +1643,9 @@ export default function ProfilePage() {
 
         {/* FORK(locks): Account Lock Durations */}
         <LockDurationsCard />
+
+        {/* FORK(attempts): Account Retry Limits */}
+        <AttemptLimitsCard />
 
         {/* Account actions */}
         <div className="flex flex-col sm:flex-row gap-2">

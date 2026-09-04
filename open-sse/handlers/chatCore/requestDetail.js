@@ -71,10 +71,14 @@ export function buildRequestDetail(base, overrides = {}) {
     providerResponse: base.providerResponse || null,
     response: base.response || {},
     pxpipe: base.pxpipe || undefined,
-    // FORK(logs): absolute path of this attempt's raw dump under <cwd>/logs (null when
-    // ENABLE_REQUEST_LOGS is off). Links the persisted record to its staged
-    // payloads so the dashboard can show them without scanning the logs tree.
+    // FORK(logs): absolute path of this attempt's raw dump (null when the dump is off). Links the
+    // persisted record to its staged payloads. Reduced to a bare directory name downstream, in
+    // requestDetailsRepo.js.
     logDir: base.logDir || undefined,
+    // FORK(smartlogs): conversation fingerprint, already reduced by the caller. Opaque here —
+    // forwarded, never produced or read. Absent for every modality but chat, which is correct
+    // rather than missing.
+    sessionTag: base.sessionTag || undefined,
     status: base.status || "success",
     ...overrides
   };

@@ -1,10 +1,13 @@
 import { handleChat } from "@/sse/handlers/chat.js";
 import {
   clearAccountError,
-  getProviderCredentials,
   isValidApiKey,
-  markAccountUnavailable,
 } from "@/sse/services/auth.js";
+// FORK(attempts): this route used to carry its own copy of the account walk — the ninth, and
+// the only one outside src/sse/handlers/. It now shares the loop with the other eight, which
+// is what gives it the attempt ceilings and the malformed-request stop it never had. Its own
+// per-attempt timeout and its response shapes are kept, because both are specific to it.
+import { runAccountAttempts } from "@/sse/services/accountAttemptLoop.js";
 import { getSettings } from "@/lib/localDb";
 import { PROVIDER_MODELS } from "@/shared/constants/models";
 import { GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS } from "open-sse/config/runtimeConfig.js";
@@ -243,125 +246,117 @@ async function forwardGeminiNativeRequest(request, body, model, action) {
   if (!GEMINI_NATIVE_MODEL_PATTERN.test(modelId)) {
     return Response.json({ error: { message: "Invalid model" } }, { status: 400 });
   }
-  const excludeConnectionIds = new Set();
   const bodyText = JSON.stringify(body);
-  let lastError = null;
-  let lastStatus = null;
 
-  while (true) {
-    const credentials = await getProviderCredentials("gemini", excludeConnectionIds, modelId);
-    if (!credentials || credentials.allRateLimited) {
-      console.log(`[GEMINI_NATIVE] exhausted model=${modelId} status=${lastStatus || Number(credentials?.lastErrorCode) || 503} error=${lastError || credentials?.lastError || "No active credentials for provider: gemini"}`);
-      return Response.json(
-        { error: { message: lastError || credentials?.lastError || "No active credentials for provider: gemini" } },
-        { status: lastStatus || Number(credentials?.lastErrorCode) || 503 }
-      );
-    }
-
-    const authHeaders = buildGeminiNativeAuthHeaders(credentials);
-    if (!authHeaders) {
-      return Response.json(
-        { error: { message: "No Gemini API key configured" } },
-        { status: 404 }
-      );
-    }
-
-    const safeConnection = getSafeGeminiConnectionLabel(credentials);
-    const startedAt = Date.now();
-    const upstreamUrl = buildGeminiNativeUrl(request.url, modelId, action);
-    const attemptController = new AbortController();
-    let timedOut = false;
-    const timeout = setTimeout(() => {
-      timedOut = true;
-      attemptController.abort();
-    }, GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS);
-    const abortAttempt = () => attemptController.abort();
-
-    if (request.signal?.aborted) {
-      console.log(`[GEMINI_NATIVE] client aborted model=${modelId} ms=0 conn=${safeConnection}`);
-      return Response.json({ error: { message: "Client closed request" } }, { status: 499 });
-    }
-
-    request.signal?.addEventListener("abort", abortAttempt, { once: true });
-    console.log(`[GEMINI_NATIVE] start model=${modelId} action=${action} conn=${safeConnection} body=${Buffer.byteLength(bodyText)}B timeout=${GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS}`);
-
-    let upstreamResponse;
-    try {
-      upstreamResponse = await fetch(upstreamUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": request.headers.get("Content-Type") || "application/json",
-          ...authHeaders,
-        },
-        body: bodyText,
-        signal: attemptController.signal,
-      });
-    } catch (error) {
-      const durationMs = Date.now() - startedAt;
-      if (request.signal?.aborted && !timedOut) {
-        console.log(`[GEMINI_NATIVE] client aborted model=${modelId} ms=${durationMs} conn=${safeConnection}`);
-        return Response.json({ error: { message: "Client closed request" } }, { status: 499 });
+  return runAccountAttempts({
+    provider: "gemini",
+    lockKey: modelId,
+    label: `[gemini/${modelId}]`,
+    logTag: "GEMINI_NATIVE",
+    signal: request.signal || null,
+    attempt: async ({ credentials }) => {
+      const authHeaders = buildGeminiNativeAuthHeaders(credentials);
+      if (!authHeaders) {
+        // Not a provider failure, so it must not rotate and must not lock an account. Reported
+        // as a success carrying an error response — the same shape the original code returned
+        // by returning straight out of the loop.
+        return {
+          success: true,
+          response: Response.json({ error: { message: "No Gemini API key configured" } }, { status: 404 }),
+        };
       }
 
-      const status = isGeminiNativeTimeoutError(error, timedOut) ? 504 : 502;
-      const errorText = getSafeGeminiNativeErrorText(error);
-      console.log(`[GEMINI_NATIVE] fetch failed model=${modelId} status=${status} ms=${durationMs} conn=${safeConnection} error=${errorText}`);
+      const safeConnection = getSafeGeminiConnectionLabel(credentials);
+      const startedAt = Date.now();
+      const upstreamUrl = buildGeminiNativeUrl(request.url, modelId, action);
 
-      const { shouldFallback } = await markAccountUnavailable(
-        credentials.connectionId,
-        status,
-        errorText,
-        "gemini",
-        modelId
-      );
+      // Per-attempt deadline, chained to the client's signal. Kept local: the shared loop
+      // bounds the WALK, this bounds one upstream call, and they are different limits.
+      const attemptController = new AbortController();
+      let timedOut = false;
+      const timeout = setTimeout(() => {
+        timedOut = true;
+        attemptController.abort();
+      }, GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS);
+      const abortAttempt = () => attemptController.abort();
+      request.signal?.addEventListener("abort", abortAttempt, { once: true });
 
-      if (shouldFallback) {
-        excludeConnectionIds.add(credentials.connectionId);
-        lastError = errorText;
-        lastStatus = status;
-        console.log(`[GEMINI_NATIVE] fallback model=${modelId} status=${status} conn=${safeConnection} exclude=${excludeConnectionIds.size}`);
-        continue;
+      console.log(`[GEMINI_NATIVE] start model=${modelId} action=${action} conn=${safeConnection} body=${Buffer.byteLength(bodyText)}B timeout=${GEMINI_NATIVE_TTS_FETCH_TIMEOUT_MS}`);
+
+      let upstreamResponse;
+      try {
+        upstreamResponse = await fetch(upstreamUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": request.headers.get("Content-Type") || "application/json",
+            ...authHeaders,
+          },
+          body: bodyText,
+          signal: attemptController.signal,
+        });
+      } catch (error) {
+        const durationMs = Date.now() - startedAt;
+        if (request.signal?.aborted && !timedOut) {
+          // The client, not the deadline. Reported as a terminal answer so the loop neither
+          // rotates nor locks an account for a request nobody is waiting on.
+          console.log(`[GEMINI_NATIVE] client aborted model=${modelId} ms=${durationMs} conn=${safeConnection}`);
+          return {
+            success: true,
+            response: Response.json({ error: { message: "Client closed request" } }, { status: 499 }),
+          };
+        }
+
+        const status = isGeminiNativeTimeoutError(error, timedOut) ? 504 : 502;
+        const errorText = getSafeGeminiNativeErrorText(error);
+        console.log(`[GEMINI_NATIVE] fetch failed model=${modelId} status=${status} ms=${durationMs} conn=${safeConnection} error=${errorText}`);
+        return {
+          success: false,
+          status,
+          error: errorText,
+          response: Response.json({ error: { message: errorText } }, { status }),
+        };
+      } finally {
+        clearTimeout(timeout);
+        request.signal?.removeEventListener("abort", abortAttempt);
       }
 
-      return Response.json({ error: { message: errorText } }, { status });
-    } finally {
-      clearTimeout(timeout);
-      request.signal?.removeEventListener("abort", abortAttempt);
-    }
+      console.log(`[GEMINI_NATIVE] upstream model=${modelId} status=${upstreamResponse.status} ms=${Date.now() - startedAt} conn=${safeConnection} ct=${upstreamResponse.headers.get("content-type") || "?"} cl=${upstreamResponse.headers.get("content-length") || "?"}`);
 
-    console.log(`[GEMINI_NATIVE] upstream model=${modelId} status=${upstreamResponse.status} ms=${Date.now() - startedAt} conn=${safeConnection} ct=${upstreamResponse.headers.get("content-type") || "?"} cl=${upstreamResponse.headers.get("content-length") || "?"}`);
+      if (upstreamResponse.ok) {
+        await clearAccountError(credentials.connectionId, credentials, modelId);
+        return {
+          success: true,
+          response: new Response(upstreamResponse.body, {
+            status: upstreamResponse.status,
+            statusText: upstreamResponse.statusText,
+            headers: corsHeadersFrom(upstreamResponse),
+          }),
+        };
+      }
 
-    if (upstreamResponse.ok) {
-      await clearAccountError(credentials.connectionId, credentials, modelId);
-      return new Response(upstreamResponse.body, {
+      const errorText = await upstreamResponse.text();
+      return {
+        success: false,
         status: upstreamResponse.status,
-        statusText: upstreamResponse.statusText,
-        headers: corsHeadersFrom(upstreamResponse),
-      });
-    }
-
-    const errorText = await upstreamResponse.text();
-    const { shouldFallback } = await markAccountUnavailable(
-      credentials.connectionId,
-      upstreamResponse.status,
-      errorText,
-      "gemini",
-      modelId
-    );
-
-    if (shouldFallback) {
-      excludeConnectionIds.add(credentials.connectionId);
-      lastError = errorText;
-      lastStatus = upstreamResponse.status;
-      continue;
-    }
-
-    return new Response(errorText, {
-      status: upstreamResponse.status,
-      statusText: upstreamResponse.statusText,
-      headers: corsHeadersFrom(upstreamResponse),
-    });
-  }
+        error: errorText,
+        // FORK(smartrouting): this route reads the response itself rather than going through
+        // parseUpstreamError, so it supplies the rate-limit signals directly.
+        errorSignals: { headers: Object.fromEntries(upstreamResponse.headers.entries()), body: errorText },
+        response: new Response(errorText, {
+          status: upstreamResponse.status,
+          statusText: upstreamResponse.statusText,
+          headers: corsHeadersFrom(upstreamResponse),
+        }),
+      };
+    },
+    // One shape for every exhaustion reason, matching what this route answered before.
+    onExhausted: ({ lastError, lastStatus, lockedError, lockedErrorCode }) => {
+      const message = lastError || lockedError || "No active credentials for provider: gemini";
+      const status = lastStatus || Number(lockedErrorCode) || 503;
+      console.log(`[GEMINI_NATIVE] exhausted model=${modelId} status=${status} error=${message}`);
+      return Response.json({ error: { message } }, { status });
+    },
+  });
 }
 
 /**

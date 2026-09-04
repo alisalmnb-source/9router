@@ -1,9 +1,15 @@
 import { getProviderConnections, validateApiKey, updateProviderConnection, getSettings, getProxyPools } from "@/lib/localDb";
 import { resolveConnectionProxyConfig, pickProxyPoolId } from "@/lib/network/connectionProxy";
 import { formatRetryAfter, checkFallbackError, isModelLockActive, buildModelLockUpdate, getEarliestModelLockUntil } from "open-sse/services/accountFallback.js";
-// FORK(locks): upstream's MAX_RATE_LIMIT_COOLDOWN_MS is reached through the resolver
-// instead of directly, so an unset setting still yields upstream's own constant.
+// FORK(locks): MAX_RATE_LIMIT_COOLDOWN_MS is no longer imported here — it is reached through the
+// resolver, so an unset setting still yields upstream's own constant.
 import { resolveLockCooldownMs, resolveProviderResetCapMs } from "@/lib/lockPolicy";
+// FORK(smartrouting): the third strategy. Ordering and counter arithmetic live in lib so they stay
+// pure; this file supplies the state and does the writes.
+import { ROUTING_STRATEGY, resolveProviderStrategy } from "@/lib/routingStrategy";
+import { sortBySmartRouting, buildErrorScoreUpdate, buildErrorScoreClearUpdate, demotedAtKey } from "@/lib/smartRouting";
+import { classifyErrorWeight } from "@/lib/errorPolicy";
+import { getBoundConnectionId, bindConnection, releaseBinding, countBindingsByConnection } from "./sessionAffinity.js";
 import { resolveProviderId, FREE_PROVIDERS } from "@/shared/constants/providers.js";
 import { getAntigravityQuotaCache } from "./antigravityQuota.js";
 import * as log from "../utils/logger.js";
@@ -26,6 +32,11 @@ function githubMonthlyResetMs(status, errorText, provider) {
  * @param {string} provider - Provider name
  * @param {Set<string>|string|null} excludeConnectionIds - Connection ID(s) to exclude (for retry with next account)
  * @param {string|null} model - Model name for per-model rate limit filtering
+ * @param {object} [options]
+ * @param {string|null} [options.preferredConnectionId] - Pin to one connection, beats every strategy
+ * @param {string|null} [options.sessionKey] - FORK(smartrouting): conversation identity from
+ *        resolveBindingKey. Null means "no conversation yet" — select, but record nothing.
+ *        Ignored by every strategy except Smart Routing.
  */
 export async function getProviderCredentials(provider, excludeConnectionIds = null, model = null, options = {}) {
   // Normalize to Set for consistent handling
@@ -33,6 +44,7 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     ? excludeConnectionIds
     : (excludeConnectionIds ? new Set([excludeConnectionIds]) : new Set());
   const preferredConnectionId = options?.preferredConnectionId || null;
+  const sessionKey = options?.sessionKey || null;
   // Acquire mutex to prevent race conditions
   const currentMutex = selectionMutex;
   let resolveMutex;
@@ -138,7 +150,10 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
     const settings = await getSettings();
     // Per-provider strategy overrides global setting
     const providerOverride = (settings.providerStrategies || {})[providerId] || {};
-    const strategy = providerOverride.fallbackStrategy || settings.fallbackStrategy || "fill-first";
+    // FORK(smartlogs): the precedence moved to resolveProviderStrategy, unchanged — the Smart Logs
+    // page needs the same answer, and a second copy would drift silently. `providerOverride` stays
+    // for stickyRoundRobinLimit below.
+    const strategy = resolveProviderStrategy(providerId, settings);
 
     let connection;
     // Pin to preferred connection if specified and available
@@ -189,6 +204,44 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
           consecutiveUseCount: 1
         });
       }
+    } else if (strategy === ROUTING_STRATEGY.SMART) {
+      // FORK(smartrouting): ordering plus conversation affinity.
+      //
+      // **This whole branch must stay synchronous and stay inside upstream's selection mutex.**
+      // No await between reading shared state and writing it, for both pairs that matter: "is this
+      // conversation assigned?" → "if not, assign it", and "read the counts" → "write the
+      // binding". Single-threaded runtime, so with no await two concurrent selections cannot
+      // interleave. Adding one breaks load distribution with no error.
+      //
+      // Consequence for anything added below: every database read it needs must already have
+      // happened above. Nothing in here writes to the database.
+      if (sessionKey) {
+        const boundId = getBoundConnectionId(sessionKey);
+        if (boundId) {
+          const bound = availableConnections.find((c) => c.id === boundId);
+          if (bound) {
+            // The conversation's account is still selectable — keep it there.
+            connection = bound;
+          } else {
+            // Locked, already failed this request, or deleted — the pin cannot be honoured, so
+            // drop it and ask the ordering again. Locked is the common case: conversations
+            // attached to an exhausted account that has just been locked for hours.
+            releaseBinding(sessionKey);
+          }
+        }
+      }
+
+      if (!connection) {
+        connection = sortBySmartRouting(availableConnections, {
+          model,
+          sessionCounts: countBindingsByConnection(),
+        })[0];
+      }
+
+      // No key yet means a conversation's first turn: serve it, record nothing. Accepted cost —
+      // turns one and two can land on different accounts, losing the cache once, where the
+      // conversation is smallest.
+      if (sessionKey && connection) bindConnection(sessionKey, connection.id);
     } else {
       // Default: fill-first (already sorted by priority in getProviderConnections)
       connection = availableConnections[0];
@@ -236,9 +289,13 @@ export async function getProviderCredentials(provider, excludeConnectionIds = nu
  * @param {string} errorText
  * @param {string|null} provider
  * @param {string|null} model - The specific model that triggered the error
+ * @param {number|null} resetsAtMs - Provider-reported reset instant, when it sent one
+ * @param {object|null} errorSignals - FORK(smartrouting): `{ headers, body }` captured beside the
+ *        upstream response. Optional and additive — without it classification falls back to the
+ *        status code and message, which is what most call sites supply.
  * @returns {{ shouldFallback: boolean, cooldownMs: number }}
  */
-export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null) {
+export async function markAccountUnavailable(connectionId, status, errorText, provider = null, model = null, resetsAtMs = null, errorSignals = null) {
   if (!connectionId || connectionId === "noauth") return { shouldFallback: false, cooldownMs: 0 };
   const connections = await getProviderConnections({ provider });
   const conn = connections.find(c => c.id === connectionId);
@@ -247,28 +304,17 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   // GitHub premium-request exhaustion is account-wide until the next UTC month.
   const githubResetAtMs = githubMonthlyResetMs(status, errorText, provider);
 
-  // FORK(locks): all three cooldown sources below converge on one duration and one
-  // write, which is why the configured durations are applied here rather than inside
-  // open-sse.
+  // FORK(locks): all three cooldown sources below converge on one duration and one write, which is
+  // why configured durations are applied here rather than inside open-sse.
   //
-  // This read is uncached — settingsRepo.getSettings() does a fresh SELECT and JSON
-  // parse every call. That is fine here and the reason is the call site, not a cache:
-  // this function already ran getProviderConnections() above and is about to run a
-  // transactional updateProviderConnection() below, so one single-row read is noise
-  // next to them, and it only happens on a failed attempt. Do not "optimise" it with a
-  // module-level cache: a saved duration would then take effect on a delay, which is
-  // exactly the behaviour the Settings card promises it does not have.
+  // Uncached on purpose. **Do not add a module-level cache** — a saved duration would then take
+  // effect on a delay, which is exactly what the Settings card promises it does not do. The read
+  // only happens on a failed attempt, next to a connections query and a transactional write.
   //
-  // Fail open to upstream's constants if it throws. The try/catch wraps the call
-  // itself rather than chaining .catch onto the returned promise, and the difference
-  // is load-bearing: a *synchronous* throw never produces a promise for .catch to
-  // attach to, so it would propagate out of this function instead of falling back.
-  // That is not hypothetical — `tests/unit/github-monthly-usage-lock.test.js` mocks
-  // `@/lib/localDb` without a `getSettings` export, and Vitest throws on reading an
-  // undeclared export of a mocked module. Both of its cases exercise the
-  // githubResetAtMs branch below, which does not even consult these settings, so a
-  // narrower read would hide the problem rather than fix it. Keep the guard here,
-  // where it covers all three branches no matter what a caller's module doubles omit.
+  // **`try`/`catch` around the call, never `.catch()` on the promise.** An upstream test mocks the
+  // db module without this export and the test runner throws *synchronously*, so no promise exists
+  // to attach a handler to and the throw would escape instead of falling back to upstream's
+  // constants. The guard sits here so it covers all three branches whatever a caller's mocks omit.
   let lockSettings;
   try {
     lockSettings = await getSettings();
@@ -287,13 +333,11 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   } else if (resetsAtMs && resetsAtMs > Date.now()) {
     shouldFallback = true;
     // Antigravity quota API provides exact per-model resetAt. Do not truncate it.
-    // FORK(locks): the cap on the non-antigravity side comes from the resolver, not from
-    // the errorConfig constant upstream writes here — see the import block at the top of
-    // this file, which no longer imports it. Resolving a conflict on this line in
-    // upstream's favour therefore leaves an unimported identifier behind, and the
-    // reference is only reached on a failed attempt, so it survives a build. The
-    // antigravity branch stays uncapped to match the githubResetAtMs branch above: both
-    // are absolute dates from the provider, not durations from the rules table.
+    // FORK(locks): **this line is where the v0.5.59 merge conflicted.** The cap on the
+    // non-antigravity side comes from the resolver, not the errorConfig constant upstream writes
+    // here — resolving in upstream's favour leaves an unimported identifier that only executes on
+    // a failed attempt, so it survives the build. The antigravity side stays uncapped to match the
+    // github branch above: both are absolute provider dates, not rules-table durations.
     cooldownMs = resolveProviderId(provider) === "antigravity"
       ? resetsAtMs - Date.now()
       : Math.min(resetsAtMs - Date.now(), resolveProviderResetCapMs(lockSettings));
@@ -308,10 +352,22 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   if (!shouldFallback) return { shouldFallback: false, cooldownMs: 0 };
 
   const reason = typeof errorText === "string" ? errorText.slice(0, 100) : "Provider error";
-  const lockUpdate = buildModelLockUpdate(githubResetAtMs ? null : model, cooldownMs);
+  const lockScope = githubResetAtMs ? null : model;
+  const lockUpdate = buildModelLockUpdate(lockScope, cooldownMs);
+
+  // FORK(smartrouting): the second layer. The lock above stops damage now; this forms a judgement
+  // over time, accumulating across lock cycles rather than within one.
+  //
+  // Same scope as the lock, so score, demotion date and lock all describe one account-and-model
+  // pair. **Written regardless of which strategy is active** — only the ordering reads these
+  // fields, so they are inert on the other two, and one write path means switching strategy does
+  // not start from a blank counter.
+  const weight = classifyErrorWeight({ provider, status, errorText, resetsAtMs, signals: errorSignals });
+  const scoreUpdate = buildErrorScoreUpdate(conn || {}, lockScope, weight);
 
   await updateProviderConnection(connectionId, {
     ...lockUpdate,
+    ...scoreUpdate,
     testStatus: "unavailable",
     lastError: reason,
     errorCode: status,
@@ -322,6 +378,12 @@ export async function markAccountUnavailable(connectionId, status, errorText, pr
   const lockKey = Object.keys(lockUpdate)[0];
   const connName = conn?.displayName || conn?.name || conn?.email || connectionId.slice(0, 8);
   log.warn("AUTH", `${connName} locked ${lockKey} for ${Math.round(cooldownMs / 1000)}s [${status}]`);
+
+  // FORK(smartrouting): logged separately — it is the only thing here that changes the account's
+  // standing rather than its availability, and nothing else would show why it stopped being first.
+  if (demotedAtKey(lockScope) in scoreUpdate) {
+    log.warn("AUTH", `${connName} demoted to last place for ${model || "all models"} (${weight} errors reached the threshold)`);
+  }
 
   if (provider && status && reason) {
     console.error(`❌ ${provider} [${status}]: ${reason}`);
@@ -345,7 +407,19 @@ export async function clearAccountError(connectionId, currentConnection, model =
   const now = Date.now();
   const allLockKeys = Object.keys(conn).filter(k => k.startsWith("modelLock_"));
 
-  if (!conn.testStatus && !conn.lastError && allLockKeys.length === 0) return;
+  // FORK(smartrouting): a success zeroes this account-and-model pair's error points. Required, not
+  // tidy — without it, failures separated by hundreds of successes would eventually add up and
+  // demote a healthy account.
+  //
+  // **Only the counter.** The demotion date stays: clearing it would let one lucky request erase an
+  // accumulated judgement, which is what the date exists to prevent.
+  //
+  // **Computed here, before the two early returns below**, and folded into their update objects —
+  // otherwise a pending score is stranded when there is no lock and no error state left to clear.
+  const scoreClear = buildErrorScoreClearUpdate(conn, model);
+  const hasScoreToClear = Object.keys(scoreClear).length > 0;
+
+  if (!conn.testStatus && !conn.lastError && allLockKeys.length === 0 && !hasScoreToClear) return;
 
   // Keys to clear: current model's lock + all expired locks
   const keysToClear = allLockKeys.filter(k => {
@@ -355,7 +429,7 @@ export async function clearAccountError(connectionId, currentConnection, model =
     return expiry && new Date(expiry).getTime() <= now;   // expired
   });
 
-  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError) return;
+  if (keysToClear.length === 0 && conn.testStatus !== "unavailable" && !conn.lastError && !hasScoreToClear) return;
 
   // Check if any active locks remain after clearing
   const remainingActiveLocks = allLockKeys.filter(k => {
@@ -364,7 +438,7 @@ export async function clearAccountError(connectionId, currentConnection, model =
     return expiry && new Date(expiry).getTime() > now;
   });
 
-  const clearObj = Object.fromEntries(keysToClear.map(k => [k, null]));
+  const clearObj = { ...Object.fromEntries(keysToClear.map(k => [k, null])), ...scoreClear };
 
   // Only reset error state if no active locks remain
   if (remainingActiveLocks.length === 0) {
