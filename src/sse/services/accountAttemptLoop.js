@@ -62,11 +62,21 @@ export function markAttemptFailure({ connectionId, status, errorText, provider, 
  * provider named in the request.
  */
 async function selectAccount({ providerId, credentialFallbackProvider, excludeConnectionIds, lockKey, selectOptions }) {
-  let credentials = await getProviderCredentials(providerId, excludeConnectionIds, lockKey, selectOptions);
+  // Same rule as markAttemptFailure above: the fourth argument is appended only when it carries
+  // something, so a selection with no session key and no pin keeps upstream's three-argument
+  // shape. `getProviderCredentials` defaults it to `{}`, so omitting it is equivalent — and an
+  // upstream test asserts the exact argument list on the web-fetch path.
+  const select = (provider) => {
+    const args = [provider, excludeConnectionIds, lockKey];
+    if (selectOptions && Object.keys(selectOptions).length > 0) args.push(selectOptions);
+    return getProviderCredentials(...args);
+  };
+
+  let credentials = await select(providerId);
   if (credentials) return { credentials, credentialProviderId: providerId };
 
   if (credentialFallbackProvider) {
-    credentials = await getProviderCredentials(credentialFallbackProvider, excludeConnectionIds, lockKey, selectOptions);
+    credentials = await select(credentialFallbackProvider);
     if (credentials) {
       log.info("AUTH", `\x1b[32m${providerId} reusing ${credentialFallbackProvider} credentials\x1b[0m`);
       return { credentials, credentialProviderId: credentialFallbackProvider };
@@ -95,6 +105,10 @@ async function selectAccount({ providerId, credentialFallbackProvider, excludeCo
  *        both are client-visible.
  * @param {string}   [params.noCredentialsMessage] Message for that case. **The default wording
  *        is asserted by an upstream test**, so it is not free to move.
+ * @param {number|null} [params.allLockedStatus] Fixed status for "every account is locked",
+ *        overriding the status derived from the last failure. Parameterised for the same reason
+ *        as `noCredentialsStatus`: v0.5.65 pinned chat to 503 and left the other seven handlers
+ *        deriving it, so one shared expression can no longer serve both.
  * @param {Function} params.attempt      async ({ credentials, credentialProviderId, attemptIndex }) => result
  *        where result is `{ success, response, status, error, resetsAtMs?, errorSignals? }`.
  * @param {Function} [params.shouldRotate] (result) => boolean, ANDed with shouldFallback.
@@ -114,6 +128,7 @@ export async function runAccountAttempts({
   credentialFallbackProvider = null,
   noCredentialsStatus = HTTP_STATUS.BAD_REQUEST,
   noCredentialsMessage = null,
+  allLockedStatus = null,
   attempt,
   shouldRotate = null,
   onAttemptFailed = null,
@@ -142,7 +157,12 @@ export async function runAccountAttempts({
 
     if (kind === "all-locked") {
       const message = lastError || extra.lockedError || "Unavailable";
-      const status = lastStatus || Number(extra.lockedErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
+      // FORK(attempts): upstream's v0.5.65 "always 503 when rate-limited" fix landed on the
+      // one line this loop hoisted out of nine handlers, so git could not carry it here.
+      // **Upstream changed chat only** — the other seven still derive the status, which is why
+      // this is an override and not a replacement. Hardcoding 503 here would silently retune
+      // seven handlers upstream deliberately left alone.
+      const status = allLockedStatus || lastStatus || Number(extra.lockedErrorCode) || HTTP_STATUS.SERVICE_UNAVAILABLE;
       log.warn(logTag, `${label} ${message} (${extra.retryAfterHuman})`);
       return unavailableResponse(status, `${label} ${message}`, extra.retryAfter, extra.retryAfterHuman);
     }

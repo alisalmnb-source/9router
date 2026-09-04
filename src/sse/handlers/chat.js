@@ -12,7 +12,7 @@ import { runAccountAttempts, markAttemptFailure } from "../services/accountAttem
 // FORK(smartrouting): conversation identity → the account a conversation stays on.
 import { resolveConversationKey } from "open-sse/utils/sessionManager.js";
 import { resolveBindingKey, sessionFingerprint } from "../services/sessionAffinity.js";
-import { handleAntigravityQuotaError } from "../services/antigravityQuota.js";
+import { handleAntigravityQuotaError, clearAntigravityStrikes } from "../services/antigravityQuota.js";
 import { getSettings } from "@/lib/localDb";
 import { getModelInfo, getComboModels } from "../services/model.js";
 import { handleChatCore } from "open-sse/handlers/chatCore.js";
@@ -28,6 +28,7 @@ import { detectFormatByEndpoint } from "open-sse/translator/formats.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { getProjectIdForConnection } from "open-sse/services/projectId.js";
+import { stripModelContextMarker } from "open-sse/utils/modelMarkers.js";
 
 /**
  * Handle chat completion request
@@ -52,7 +53,11 @@ export async function handleChat(request, clientRawRequest = null) {
       headers: Object.fromEntries(request.headers.entries())
     };
   }
-  const modelStr = body.model;
+  // Claude Code marks a 1M-context request as `<model>[1m]`; the marker matches
+  // no combo, alias or provider/model pair, so it must not reach resolution.
+  // The capability travels in the anthropic-beta header, forwarded as-is.
+  const { model: modelStr, contextMarker } = stripModelContextMarker(body.model);
+  if (contextMarker) body.model = modelStr;
 
   // Request summary is emitted as the unified "▶" line in chatCore (has fmt/thinking/account)
 
@@ -249,6 +254,10 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
     // client-visible change nobody asked for.
     noCredentialsStatus: HTTP_STATUS.NOT_FOUND,
     noCredentialsMessage: `No active credentials for provider: ${provider}`,
+    // Upstream pins chat — and only chat — to 503 when every account is locked, so a client
+    // cannot read a provider's 429 as its own. Set here rather than in the loop because the
+    // other seven handlers still derive this status upstream.
+    allLockedStatus: HTTP_STATUS.SERVICE_UNAVAILABLE,
     attempt: async ({ credentials }) => {
       // Account selection shown in the unified "▶" line (acc:...)
       const refreshedCredentials = await checkAndRefreshToken(provider, credentials);
@@ -306,6 +315,11 @@ async function handleSingleModelChat(body, modelStr, clientRawRequest = null, re
         },
         onRequestSuccess: async () => {
           await clearAccountError(credentials.connectionId, credentials, model);
+          // Upstream ships this call inside its own account walk, which this fork replaced —
+          // so it has to be carried by hand and a merge cannot flag its absence. Without it
+          // the strike breaker's "consecutive" never resets: a recovered connection+model
+          // stays cache-blocked for the full 15 minutes even while it is answering fine.
+          clearAntigravityStrikes(credentials.connectionId, model);
         }
       });
 

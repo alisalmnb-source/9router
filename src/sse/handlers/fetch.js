@@ -13,7 +13,7 @@ import { HTTP_STATUS } from "open-sse/config/runtimeConfig.js";
 import * as log from "../utils/logger.js";
 import { updateProviderCredentials, checkAndRefreshToken } from "../services/tokenRefresh.js";
 import { handleComboChat, getComboModelsFromData } from "open-sse/services/combo.js";
-import { assertPublicUrl } from "@/shared/utils/ssrfGuard.js";
+import { assertPublicUrlResolved } from "@/shared/utils/ssrfGuard.js";
 
 /**
  * Handle web fetch (URL extraction) request for the SSE/Next.js server.
@@ -79,9 +79,10 @@ export async function handleFetch(request) {
     return errorResponse(HTTP_STATUS.BAD_REQUEST, "Invalid URL format");
   }
 
-  // SSRF guard: reject internal/private/metadata targets
+  // SSRF guard: reject internal/private/metadata targets, including
+  // hostnames that merely resolve to one (DNS lookup, not just literal checks).
   try {
-    assertPublicUrl(targetUrl);
+    await assertPublicUrlResolved(targetUrl);
   } catch (err) {
     log.warn("FETCH", "Blocked URL", { url: targetUrl });
     return errorResponse(HTTP_STATUS.BAD_REQUEST, err.message);
@@ -155,12 +156,17 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
 
   // Credential + fallback loop
   //
-  // FORK(attempts): lockKey stays null here, as it was before — this handler has no model
-  // dimension, so a failure writes the account-wide modelLock___all, and the lock has to be
-  // read back under the same key.
+  // FORK(attempts): the lock key is upstream's `webfetch:<providerId>`, no longer null.
+  // **A web-fetch failure must not lock the account for chat** — providers such as Ollama
+  // serve both from one connection, so the account-wide key would take the LLM side offline
+  // with it. One const because the same value has to reach the read (lockKey) and both
+  // writes (clearAccountError here, markAttemptFailure inside the loop); three literals
+  // would let a lock be written under a key nothing reads back.
+  const fetchLockKey = `webfetch:${providerId}`;
+
   return runAccountAttempts({
     provider: providerId,
-    lockKey: null,
+    lockKey: fetchLockKey,
     label: `[${providerId}]`,
     logTag: "FETCH",
     signal: request?.signal || null,
@@ -188,7 +194,7 @@ async function handleSingleProviderFetch(body, providerInput, request, apiKey, s
       });
 
       if (result.success) {
-        await clearAccountError(credentials.connectionId, credentials);
+        await clearAccountError(credentials.connectionId, credentials, fetchLockKey);
         return {
           success: true,
           response: new Response(JSON.stringify(result.data), {

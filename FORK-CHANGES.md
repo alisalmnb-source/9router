@@ -5,7 +5,7 @@ be resolved file by file.
 
 - **Upstream:** [`decolua/9router`](https://github.com/decolua/9router) — remote `upstream`,
   default branch `master` (there is no `main`)
-- **Fork point:** `699edac3` (`v0.5.55`) · **last merged:** `v0.5.59`
+- **Fork point:** `699edac3` (`v0.5.55`) · **last merged:** `v0.5.65`
 - **Why each feature exists, and what the user asked for:** `Specs.md`. This file does not
   repeat it.
 
@@ -83,9 +83,9 @@ separate. Many files carry more than one tag, so no single tag is the whole of a
 |---|---|---|---|---|
 | `services/auth.js` | locks, smartrouting, smartlogs | `+ beside`, `~ replaced` | **Three features live here; the largest single edit.**<br>• `getProviderCredentials`: an `options.sessionKey`, a third strategy branch, and the inline strategy precedence extracted to `resolveProviderStrategy`.<br>• `markAccountUnavailable`: an optional `errorSignals` parameter; reads settings once; routes two of its three cooldown branches through the lock resolver; computes a `lockScope` shared by lock and score; folds the error-score update into its single write; logs a demotion separately.<br>• `clearAccountError`: computes the score clear **before** its two early returns. | • The `resetsAtMs` branch is where `v0.5.59` conflicted; its antigravity carve-out skips the *cap*, not the resolver.<br>• The settings read stays in `try`/`catch`, never `.catch()` — an upstream test mocks the db module and the throw is **synchronous**, so no promise exists to catch.<br>• A refactor of `markAccountUnavailable` lands here and nowhere else. |
 | `services/tokenRefresh.js` | tokenstat | `+ beside` | `recordRefreshAttempt` called from both branches of `checkAndRefreshToken`. Upstream's `if` condition line is untouched. | Two silent risks:<br>• Upstream retuning the success condition reclassifies attempts — the recorded outcome is decided by *which branch ran*.<br>• An early `return` inside the refresh block skips both calls, which reads as a connection that stopped being refreshed rather than one that stopped being recorded. |
-| `handlers/chat.js` | smartrouting, smartlogs, attempts | `~ replaced` | • `while (true)` walk replaced by one `runAccountAttempts` call whose `attempt` is the old loop body.<br>• The only call site with an `onAttemptFailed` hook — Antigravity's quota API is consulted for an exact reset before any lock is written.<br>• **Where the raw conversation id lives and stops**: split into a binding key and a fingerprint, and never forwarded. | • Keeps its own `noCredentialsStatus` (404) and message — both differ from the other eight and both are client-visible.<br>• Its account walk is why log rows are per attempt, and why some failures produce no row at all. |
+| `handlers/chat.js` | smartrouting, smartlogs, attempts | `~ replaced` | • `while (true)` walk replaced by one `runAccountAttempts` call whose `attempt` is the old loop body.<br>• The only call site with an `onAttemptFailed` hook — Antigravity's quota API is consulted for an exact reset before any lock is written.<br>• **Where the raw conversation id lives and stops**: split into a binding key and a fingerprint, and never forwarded.<br>• Carries `clearAntigravityStrikes` in its `onRequestSuccess`, and `allLockedStatus`. | • Keeps its own `noCredentialsStatus` (404) and message — both differ from the other eight and both are client-visible.<br>• Its account walk is why log rows are per attempt, and why some failures produce no row at all.<br>• **Both values upstream puts inside its own walk have to be carried by hand here**, and their absence is silent: `clearAntigravityStrikes` (see [thread 6](#6-clearantigravitystrikes-on-the-success-path)) and the 503 (see the loop's row below). |
 | `handlers/embeddings.js` | attempts | `~ replaced` | Loop replaced. The usage save stays inside `attempt` because it needs the connection id. | |
-| `handlers/fetch.js` | attempts | `~ replaced` | Loop replaced. Supplies `buildFailureResponse` — it answers with its own JSON envelope. | `lockKey: null` is load-bearing: no model dimension here, so failures write the account-wide lock key and it must be read back under the same one. |
+| `handlers/fetch.js` | attempts | `~ replaced` | Loop replaced. Supplies `buildFailureResponse` — it answers with its own JSON envelope. | `webfetch:<providerId>` is the lock key, held in one const because the read and both writes must agree. **It used to be `null` and that is now wrong**: `v0.5.65` made Ollama a fetch provider, and Ollama serves chat and fetch from one connection, so the account-wide key took the LLM side offline with it. An upstream test asserts this key and the exact argument list on this path. |
 | `handlers/imageGeneration.js` | attempts | `~ replaced` | Loop replaced; `handleSingleModelImage` gained `signal` in its options. | Losing `signal` opts this handler out of the disconnect stop with no error. |
 | `handlers/search.js` | attempts | `~ replaced` | Loop replaced. The credential-fallback provider hop moved in as `credentialFallbackProvider`, which also reports which provider owns the connection so the lock is attributed correctly. | `websearch:<id>` stays the lock key. |
 | `handlers/stt.js` | attempts | `~ replaced` | Loop replaced. | |
@@ -122,7 +122,7 @@ separate. Many files carry more than one tag, so no single tag is the whole of a
 
 ## Cross-file threads
 
-Five things that a single-file review cannot see. Each is a value that must survive every
+Six things that a single-file review cannot see. Each is a value that must survive every
 hop, or a shape that must hold across files.
 
 ### 1. `logDir` — the log record's link to its dump
@@ -162,6 +162,26 @@ beside the shared call** — it works, which is exactly why nothing flags it. It
 loops for that reason. Separately, the client abort signal has to be threaded from each of
 the nine call sites; a site that skips it opts out of the disconnect stop with no error.
 
+The direction no check covers at all: because nine near-identical loop bodies were hoisted
+into one file, **an upstream one-line fix inside any of those bodies lands in a file upstream
+does not have.** Git raises no conflict, the build passes, and `fork-check.mjs` asserts
+nothing about it — the fix is simply absent. `v0.5.65` did this twice, and both had to be
+carried by hand: the all-locked 503 and `clearAntigravityStrikes`. So reading
+`git log -p upstream/master -- src/sse/handlers/` for one-line changes inside the old loop
+bodies is part of a merge, not an optional extra. Worth noting upstream retuned **only**
+chat both times, so the answer is usually an override at one call site rather than an edit
+to the shared expression.
+
+### 6. `clearAntigravityStrikes` on the success path
+
+`antigravityQuota.js` counts a connection+model pair's 429s and, at three inside a minute,
+cache-blocks the pair for fifteen minutes regardless of what the quota API claims. Upstream
+clears that counter from an `onRequestSuccess` inside its own account walk — the walk this
+fork replaced — so **the call exists only because `chat.js` carries it by hand.** Dropping it
+leaves the import as the sole trace, and "consecutive" stops meaning consecutive: a pair that
+has recovered stays blocked the full fifteen minutes while answering normally. Nothing counts
+this, and the block is invisible in the dashboard because this path writes no `modelLock_*`.
+
 ---
 
 ## Files the fork added
@@ -177,7 +197,7 @@ exists and what each file owns.
 | `src/lib/routingStrategy.js` | smartrouting, smartlogs | The three strategy values, their labels, the inherit sentinel, and `resolveProviderStrategy`. **Zero imports on purpose** — both Settings surfaces need the option list, and reaching the classification chain from a client component would ship the whole phrase table to the browser for three labels. |
 | `src/lib/attemptPolicy.js` | attempts | The two limit defaults, their field metadata and the resolver. Its defaults are imported into `DEFAULT_SETTINGS` rather than duplicated there. Pure. |
 | `src/lib/requestLogsFs.js` | logs | Read-only accessor for the dump tree: name parsing, stage reading, outcome resolution, retention. **The only fork-added code that deletes files.** Rewrites nothing it reads. |
-| `src/sse/services/accountAttemptLoop.js` | attempts | The single account walk. Owns credential selection, the three exhaustion exits, both ceilings, the abort check, the malformed-request stop, failure marking and the session unbind. Exactly three named hooks; a fourth is how the loop redistributes. |
+| `src/sse/services/accountAttemptLoop.js` | attempts | The single account walk. Owns credential selection, the three exhaustion exits, both ceilings, the abort check, the malformed-request stop, failure marking and the session unbind. Exactly three named hooks; a fourth is how the loop redistributes. **Because nine handlers' identical lines were hoisted in here, an upstream one-line fix to any of them lands in a file upstream has no version of — so no conflict is raised and nothing fails.** `allLockedStatus` exists for exactly that: `v0.5.65` pinned chat's all-locked answer to 503 and left the other seven deriving it, so the status is a per-call-site override rather than one shared expression. Both optional-argument shapers (`markAttemptFailure`, and selection's fourth argument) append only when they carry something, so a call with nothing extra keeps upstream's shape and upstream's tests keep passing. |
 | `src/sse/services/sessionAffinity.js` | smartrouting, smartlogs | The in-memory conversation→account map and its idle window, the fingerprint, and a display-only snapshot that refreshes nothing. Every export synchronous by design. |
 | `src/sse/services/tokenRefreshStatus.js` | tokenstat | Both halves of the token-status policy — the written shape and the read-side resolution — in one file so they cannot drift. No db import. Nothing branches on a provider id. |
 | `src/shared/utils/connectionTest.js` | conntest | Client wrapper around the existing test route, plus the timeout that route has no server-side equivalent for. |
@@ -239,7 +259,9 @@ rather than the fork's.
 | `open-sse/translator/formats.js` | Format ids become part of dump directory names. | An id containing `_` splits every directory name wrongly. Read the **values**, not the keys — the keys do use underscores and never reach a name. |
 | `open-sse/transformer/responsesTransformer.js` | Has a logger factory with no callers. | Wiring it up puts directories in the dump tree that retention will not touch. |
 | `open-sse/handlers/chatCore.js` 401 block, `open-sse/executors/base.js` | The refresh path `tokenstat` deliberately does not observe — it calls the executor directly, so the result never passes the credential merge and a failure is a log line and nothing else. | If upstream ever routes it through the shared refresh entry point, the gap closes for free. Check whether it did. |
-| `tests/unit/github-monthly-usage-lock.test.js` | **The only upstream test whose module mocks constrain fork code.** It mocks the db module with two exports, and the test runner throws on reading an undeclared export — so the settings read the `locks` feature added must survive a **synchronous** throw. | Its two cases take different branches.<br>• One never consults settings and passes.<br>• The other reaches the resolver and **fails by design**: it pins upstream's two minutes by reading it through this feature's own fallback. Expect that failure.<br>• Only the test comparison catches a real regression here. |
+| `src/sse/services/antigravityQuota.js` | Two things `chat.js` reaches into: `handleAntigravityQuotaError`, whose return is fed straight to the lock as `resetsAtMs`, and `clearAntigravityStrikes`, which the fork must call itself. Its strike breaker also writes 0% entries into the quota cache that `auth.js` pre-filters on. | • **The return value is no longer only "the provider reported a reset"** — since `v0.5.65` it can also be a synthesized 15-minute circuit-break deadline. Both are legal lock instants, so nothing breaks, but the antigravity carve-out skips the cap and this now rides it too.<br>• The cache write is why a strike-blocked pair is *removed* from the pool rather than ranked last: the pre-filter runs before the strategy branches. Moving the pre-filter below them would let Smart Routing rank a pair upstream has circuit-broken.<br>• 409s count as strikes, so these blocks reach the `smartrouting` error score as well. |
+| `tests/unit/github-monthly-usage-lock.test.js` | One of two upstream tests whose mocks constrain fork code, and **the only one expected to fail.** It mocks the db module with two exports, and the test runner throws on reading an undeclared export — so the settings read the `locks` feature added must survive a **synchronous** throw. | Its two cases take different branches.<br>• One never consults settings and passes.<br>• The other reaches the resolver and **fails by design**: it pins upstream's two minutes by reading it through this feature's own fallback. Expect that failure.<br>• Only the test comparison catches a real regression here. |
+| `tests/unit/fetch-success-clears-account.test.js` | The second such test, and it **passes** — keep it that way. It asserts the web-fetch lock key *and the exact argument list* of all three `auth.js` calls, so it is the one upstream test that pins the fork's optional-argument shaping rather than just its behaviour. | • A trailing argument added unconditionally to selection or marking fails it on arity alone, with the behaviour still correct — which reads as a broken test rather than a broken call.<br>• It is also the only automated check that the `webfetch:` key survives; nothing else reads it back. |
 | `src/lib/db/index.js`, `src/lib/localDb.js` | How fork code reaches the database. All fork-added routes use the former; `auth.js` is the only fork-touched file on the latter, through upstream's own import line. | Renaming an export either side is a build failure — the good direction. |
 | `src/lib/db/backup.js` | Excludes request details from backups. | Explains a known limitation, nothing more. |
 | `.gitignore` | One line keeps the raw dump tree out of version control. **Neither that line nor the docs line was added by the fork.** | Lose it and every dump — full prompts, replies, headers — shows up in `git status`, one `git add .` from being published. |
@@ -322,5 +344,6 @@ prose. The exclusions above still apply.
 
 | Upstream | Merged | Conflicts | Resolution |
 |---|---|---|---|
+| `v0.5.65` (`4eda76e2`) | 2026-09-04 | `src/sse/handlers/chat.js` (3 hunks), `src/sse/handlers/fetch.js` (2 hunks) — both the `~ replaced` walk against upstream's `while (true)` | Kept the fork's loop in both; took upstream's `webfetch:<providerId>` lock key, which **retired the `lockKey: null` justification** rather than surviving it. **The two changes git could not show were the ones that mattered:** upstream's all-locked 503 and `clearAntigravityStrikes` both sit inside the walk this fork replaced, so they were carried by hand — the 503 as a per-call-site `allLockedStatus` because upstream retuned chat only. Selection's fourth argument became conditional so an upstream test that pins the argument list keeps passing. Four files auto-merged into fork code (`requestDetail.js`, `dashboardGuard.js`, `ConnectionsCard.js`, `providers/[id]/page.js`) and all four were verified by hand rather than trusted. |
 | `v0.5.59` (`5920eec4`) | 2026-08-29 | `src/sse/services/auth.js`, in the provider-reported-reset branch of `markAccountUnavailable` | Kept upstream's antigravity carve-out with the fork's resolver as the cap on the other side; commented in place. The review that followed found four defects, **none of them caught by a mechanical check** — each blind spot is now noted where the code lives rather than retold here. |
 | `v0.5.55` (`699edac3`) | — | — | Fork point. No merges before this. |
