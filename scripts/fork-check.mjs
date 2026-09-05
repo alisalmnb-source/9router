@@ -370,7 +370,11 @@ const CHECKS = [
   check(20, "tokenstat", "the due-time formula still agrees with the scheduler", () => {
     const lines = gitGrep(["-n", "--untracked", "BACKGROUND_REFRESH_LEAD_MS", "--", "src"]);
     const files = new Set(lines.map((l) => l.split(":")[0]));
-    const counted = lines.length === 7 && files.size === 2;
+    // 6, not 7: v0.5.69 deleted the "Scheduler started" log line that reported the lead
+    // alongside the interval. The constant, its export and the formula are untouched — the
+    // number moved because a log statement went away, which is why the guard assertions
+    // below and not this count are what the item actually rests on.
+    const counted = lines.length === 6 && files.size === 2;
 
     // The quiet failure no count can see: a FOURTH eligibility condition in
     // selectConnectionsNeedingRefresh makes the sweep skip connections the fork still
@@ -395,7 +399,7 @@ const CHECKS = [
     const missing = Object.entries(guards).filter(([, v]) => !v).map(([k]) => k);
     return {
       ok: counted && missing.length === 0,
-      detail: `${lines.length} hits / ${files.size} files (expect 7 / 2); guards ${missing.length ? `MISSING: ${missing.join(", ")}` : "all four present"} — a fifth one is invisible here, read the function and its caller`,
+      detail: `${lines.length} hits / ${files.size} files (expect 6 / 2); guards ${missing.length ? `MISSING: ${missing.join(", ")}` : "all four present"} — a fifth one is invisible here, read the function and its caller`,
       lines,
     };
   }),
